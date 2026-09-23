@@ -609,6 +609,10 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         boolean drownAllowed = true;
         // 悬浮成员（ElevationMoveUnit，例如 elude）/ 真正贴地走的成员：决定派生类型的 hovering
         boolean hoverOnly = false, groundWalker = false;
+        // 【翻墙（allowLegStep）】腿类单位（Spiroct/Arkyid…）能踩着方块走（原版
+        // `UnitType.allowLegStep` + `LegsUnit.solidity()` 用 `EntityCollisions.legsSolid`）。
+        // 巨兽以前两样都没接：有腿成员的巨兽撞墙就停（用户报的"翻墙能力没了"）。
+        boolean legStep = false;
         for(UnitType t : tally.keys()){
             // 【按成员个数加权】这里 tally 是按"类型"遍历的（每种类型只来一次），
             // 所以求和必须乘上该类型的成员数 —— 原来只加一次、计数却按成员数，
@@ -656,6 +660,7 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             }
             if(hov) hoverOnly = true;
             if(!t.flying && !UnitComboMerge.isNaval(t) && !hov) groundWalker = true;
+            if(t.allowLegStep) legStep = true;
         }
         if(envOn != 0) ct.envEnabled = envOn;
         if(envOff != ~0) ct.envDisabled = envOff;
@@ -670,6 +675,8 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         // 只要有一个真正靠地面走的成员（机甲/履带/腿），它的腿是踩着地面的，就按原版吃地形状态。
         // （溺水那条另有口径：只要有一台不淹就不淹，见上面 canDrown。）
         ct.hovering = hoverOnly && !groundWalker;
+        // 【翻墙按成员推导】有腿类成员（allowLegStep）→ 巨兽也能踩着方块走（碰撞用 legsSolid）。
+        ct.allowLegStep = legStep;
         ct.speed = spdCount > 0 ? Math.max(spd / spdCount, 0.3f) : 0.8f;
         ct.mineTier = tier;
         ct.mineSpeed = mineSpd;
@@ -724,8 +731,14 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             // pathCost 读旧 Pathfinder.costTypes（按下标取实例），pathCostId 读
             // ControlPathfinder.costTypes（ground=0/hover=1/legs=2/naval=3）
             if(g){
-                ct.pathCost = mindustry.ai.Pathfinder.costTypes.get(mindustry.ai.Pathfinder.costGround);
-                ct.pathCostId = mindustry.ai.ControlPathfinder.costIdGround;
+                // 原版 initPathType 的顺序：allowLegStep（腿）优先于普通地面
+                if(ct.allowLegStep){
+                    ct.pathCost = mindustry.ai.Pathfinder.costTypes.get(mindustry.ai.Pathfinder.costLegs);
+                    ct.pathCostId = mindustry.ai.ControlPathfinder.costIdLegs;
+                }else{
+                    ct.pathCost = mindustry.ai.Pathfinder.costTypes.get(mindustry.ai.Pathfinder.costGround);
+                    ct.pathCostId = mindustry.ai.ControlPathfinder.costIdGround;
+                }
             }else if(n){
                 ct.pathCost = mindustry.ai.Pathfinder.costTypes.get(mindustry.ai.Pathfinder.costNaval);
                 ct.pathCostId = mindustry.ai.ControlPathfinder.costIdNaval;
@@ -869,7 +882,18 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
     }
 
     /**
-     * 网络快照：原版字段之后追加成员列表（逐条全量内联，与原版货舱同一格式）。
+     * 网络快照：原版字段之后追加**紧凑构成**（每个成员只有 id + 类型 id，见
+     * {@link #writeMembersSync}）。
+     *
+     * <p>【为什么不发完整成员数据】服务端每个实体的快照是 `id(4) + classId(1) + writeSync`，
+     * 按 800 字节分批（`NetServer`）：成员数一多，单只巨兽就能到几千字节（实测 18 只 ≈ 3.1KB、
+     * 20 只 ≈ 3.4KB、24 只 ≈ 4.1KB）。而联机快照走 UDP、arc 客户端写缓冲只有 **16384 字节**
+     * （`new Client(16384, 25000, …)`）——一超就 BufferOverflow，**整包被丢**，
+     * 客户端只看到房主看到的东西：用户报的"成员 &gt; 18 时非房主客户端完全看不见这只大单位"。
+     * 客户端其实只需要"成员类型构成"来推导巨兽的类型/武器/能力（见 {@link #refreshDerived}），
+     * 完整成员数据（血量/弹药/自定义字段）只在**服务端解体**和**存档**里用得到 ——
+     * 快照只发构成，单实体快照从 KB 降到几十字节。
+     *
      * 注意 super.readSync 结尾会调 afterSync → setType → setupWeapons，
      * 那一刻 members 还是上一份快照的内容（构成一致，无碍）；返回后此处读入
      * 新成员并 refreshDerived，构成若变化会立刻重建。
@@ -877,7 +901,7 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
     @Override
     public void writeSync(Writes write){
         super.writeSync(write);
-        writeMembers(write);
+        writeMembersSync(write);
     }
 
     @Override
@@ -978,6 +1002,47 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         write.b(body);
     }
 
+    /**
+     * 【网络快照专用的紧凑成员块（版本 3）】每个成员只写 `memberId(4) + typeId(2)`。
+     *
+     * <p>为什么不能像存档那样全量发：服务端按 `id(4)+classId(1)+writeSync` 发实体快照、
+     * 每 800 字节分一批，而快照走 UDP、arc 客户端写缓冲只有 16384 字节
+     * （`new Client(16384, 25000, …)`）—— 单只巨兽的成员块在 18 只时就已经 3.1KB、
+     * 20 只 3.4KB（实测），一旦连同别的实体把整包顶过 16KB，**整包被丢**，
+     * 非房主客户端就完全看不到这只大单位（用户报的"成员 &gt; 18 时组合体对成员不可见"）。
+     *
+     * <p>客户端要用成员的地方只有三处：推导派生类型（要**类型**构成）、
+     * 代表类型图标/体型（要 representative 类型）、摘幽灵成员（要成员 **id**）——
+     * 全都在这 6 字节里。完整成员数据（血量/弹药/自定义字段）只在服务端解体与存档里用，
+     * 继续走 {@link #writeMembers}（版本 2，逐条全量内联）。
+     */
+    private void writeMembersSync(Writes write){
+        byte[] body;
+        try{
+            // 【框架必须和全量块一致】标记 + 长度 + 体（读端先读 tag/len，再在体里读 version）：
+            // 少了长度前缀，读端会把版本字节当成"块长度"（实测报错"成员块长度异常: 50331648"）。
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            Writes w = new Writes(new java.io.DataOutputStream(bos));
+            w.b(3);                                      // 版本 3 = 紧凑构成
+            w.i(dominant == null ? -1 : dominant.id);
+            w.i(members.size);
+            for(int i = 0; i < members.size; i++){
+                UnitPayload up = members.get(i);
+                Unit mu = up == null ? null : up.unit;
+                w.i(mu == null ? 0 : mu.id());
+                w.s((short)(mu == null || mu.type == null ? -1 : mu.type.id));
+            }
+            body = bos.toByteArray();
+        }catch(Throwable t){
+            // 写一半绝不能把流留在中间（后面还有实体）：按"0 成员"重写一个完整块。
+            Log.err("[combine] 组合巨兽紧凑成员块写出失败，退回空构成", t);
+            body = new byte[]{3, (byte)0xFF, (byte)0xFF, (byte)0xFF, (byte)0xFF, 0, 0, 0, 0};  // 版本3, domId=-1, count=0
+        }
+        write.b(MEMBER_TAG);
+        write.i(body.length);
+        write.b(body);
+    }
+
     private void readMembers(Reads read){
         // 【先读进临时表】中途读崩（对端缺模组、字节错位…）时不要动**已有的**成员构成：
         // 同一只巨兽的构成不会自己变，上一份离真相最近；直接 clear 会把巨兽变成"没有成员的壳"——
@@ -1021,6 +1086,36 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         Reads r = new Reads(new java.io.DataInputStream(new java.io.ByteArrayInputStream(body)));
         int version = r.ub();
         int n;
+        if(version == 3){
+            // 【版本 3 = 紧凑构成】每个成员只有 id + 类型 id（网络快照专用，见 writeMembersSync）：
+            // 客户端拿它重建"成员类型构成"（推导类型/武器/能力）与成员 id（摘幽灵），
+            // 完整成员数据仍在服务端内存与存档里。
+            int domId = r.i();
+            if(domId >= 0){
+                UnitType t = Vars.content.unit(domId);
+                if(t != null) domHint = t;
+            }
+            n = r.i();
+            if(n < 0 || n > 4096)
+                throw new IllegalArgumentException("紧凑成员数量异常: " + n);
+            for(int i = 0; i < n; i++){
+                int memberId = r.i();
+                int typeId = r.s();
+                UnitType mt = Vars.content.unit(typeId);
+                if(mt == null)
+                    throw new IllegalArgumentException("紧凑成员类型找不到: " + typeId);
+                // 客户端读快照时 this.team 可能还没赋值（队伍是快照上下文带的），
+                // 成员 stub 只需要"类型"，队伍取个安全值即可（仅用于推导/摘幽灵，不入世界）。
+                Unit mu = mt.create(this.team == null ? mindustry.game.Team.derelict : this.team);
+                if(memberId != 0) mu.id(memberId);
+                parsed.add(new UnitPayload(mu));
+            }
+            members.clear();
+            members.addAll(parsed);
+            if(domHint != null) dominant = domHint;
+            if(Vars.net.client()) removeGhostMembers();
+            return;
+        }
         if(version >= 1){
             if(version >= 2){
                 int domId = r.i();
@@ -1583,6 +1678,10 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         int mode = moveMode();
         if(mode == MODE_SWIM && !hasGround) return EntityCollisions::waterSolid;
         if(mode == MODE_STUCK) return EntityCollisions::waterSolid;
+        // 【翻墙】腿类单位原版是 `type.allowLegStep ? EntityCollisions::legsSolid : ::solid`
+        // （legsSolid 只挡"石头/实心地板"，玩家放的建筑都能踩过去）。有腿成员的巨兽照做，
+        // 否则它会被自己的腿绊住：撞墙就停（用户报的"翻墙能力没了"）。
+        if(type != null && type.allowLegStep) return EntityCollisions::legsSolid;
         return EntityCollisions::solid;
     }
 
