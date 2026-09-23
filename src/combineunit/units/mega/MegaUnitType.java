@@ -236,6 +236,22 @@ public class MegaUnitType extends UnitType {
         return Core.atlas != null && Core.atlas.isFound(dom.cellRegion) ? dom.cellRegion : null;
     }
 
+
+    /**
+     * 巨兽要不要**自己补画身体部件**（腿/机甲腿/履带/爬虫身）。
+     *
+     * <p>规则：代表类型有真·整图（{@code unit-<名字>-full}）时通常不再自己拼部件（否则两套）；
+     * 但**腿类**和**机甲**例外 —— 整图里那两条腿是"图标姿态"（蜷在身体底下、缩放后基本看不见），
+     * 只画整图看着就是"没腿"（用户报的"LegsUnit 的腿是好几条长腿，你就是没有画"）。
+     * 这两种一律再叠一层原版 drawLegs/drawMech 画出来的程序化部件。
+     */
+    public static boolean drawOwnParts(MegaUnitEntity mu, UnitType dom, TextureRegion region){
+        if(mu == null || dom == null || mu.attKind == MegaUnitEntity.ATT_NONE) return false;
+        if(mu.attKind == MegaUnitEntity.ATT_LEGS || mu.attKind == MegaUnitEntity.ATT_MECH) return true;
+        // 其余种类：拿到的不是真·整图（模组单位常见）就自己补
+        return region == null || region != fullArt(dom);
+    }
+
     /** 躯干图（region → UI 图标）。 */
     static TextureRegion torsoArt(UnitType dom) {
         if (dom == null) return null;
@@ -406,7 +422,13 @@ public class MegaUnitType extends UnitType {
         // （dagger/fortress 的 -full 里那两条腿几乎贴在躯干下面），只画整图看着就是没腿
         //（用户报的"组合巨兽 mech 的脚怎么又不画了"），所以机甲一律再叠一层按体型画的机甲腿。
         boolean mech = mu != null && mu.attKind == MegaUnitEntity.ATT_MECH;
-        boolean bakedParts = !mech && dom != null && region != null && region == fullArt(dom);
+        // 【腿类也要像机甲一样"再叠一层自己画的部件"】原版腿类单位的长腿是**逐帧程序化画出来**的
+        // （LegsUnit 维护每根腿的 base/joint，drawLegs 按状态画长腿）；而 `unit-<名字>-full`
+        // 整图里那几条腿是"图标姿态"（蜷在身体底下，缩放后基本看不见）。
+        // 之前只给机甲开了例外，腿类走"整图已含部件"分支 → 巨兽看起来**一条腿都没有**
+        //（用户报的"LegsUnit 的腿是好几条长腿，你就是没有画"；真客户端截图对比：
+        //  左边原版 spiroct 六条长腿，右边巨兽是个没腿的疙瘩）。
+        boolean bakedParts = !drawOwnParts(mu, dom, region);
         float s = mu == null ? 1f : mu.bodyScale();
         boolean isPayload = !unit.isAdded();
         float z = isPayload ? Draw.z()

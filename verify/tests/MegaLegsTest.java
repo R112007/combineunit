@@ -109,7 +109,28 @@ public class MegaLegsTest implements ApplicationListener{
         else{
             check("腿类单位能融合（前置）", true);
             check("腿类巨兽 instanceof Legsc（腿部绘制的前提）", legsBeast instanceof mindustry.gen.Legsc);
+            // 【用户报的"你就是没有画"】有真·整图的代表类型（arkyid）也必须自己补画腿：
+            // 整图里的腿是"图标姿态"，只画整图 = 看起来没腿。
+            Object drawOwn = null;
+            try{
+                Class<?> mt = Class.forName("combineunit.units.mega.MegaUnitType", true, ml);
+                java.lang.reflect.Method m = mt.getMethod("drawOwnParts",
+                    Class.forName("combineunit.units.mega.MegaUnitEntity", true, ml),
+                    UnitType.class, arc.graphics.g2d.TextureRegion.class);
+                drawOwn = m.invoke(null, legsBeast, legsBeast.type, null);
+            }catch(Throwable t){ System.out.println("[ML] 反射 drawOwnParts 失败: " + t); }
+            Object attKind = null;
+            try{
+                java.lang.reflect.Field f = legsBeast.getClass().getDeclaredField("attKind");
+                f.setAccessible(true);
+                attKind = f.get(legsBeast);
+            }catch(Throwable ignored){}
+            System.out.println("[ML] 巨兽 attKind=" + attKind + " drawOwnParts=" + drawOwn
+                + "（腿类必须自己画腿）");
+            check("腿类巨兽即使有真·整图也自己补画腿（drawOwnParts=true）", Boolean.TRUE.equals(drawOwn));
             check("腿类巨兽的 type.allowLegStep=true（翻墙能力）", legsBeast.type.allowLegStep);
+            check("腿类巨兽的腿数=代表类型腿数（6 条长腿）",
+                legsBeast instanceof mindustry.gen.Legsc lc && lc.legs().length == UnitTypes.arkyid.legCount);
 
             // 墙面前：会翻墙的单位应当认为"不实心"（能踩上去）
             place(Blocks.copperWall, wx, wy, Team.sharded);
