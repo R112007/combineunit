@@ -380,6 +380,8 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         //  · 多份力场还会各自回复（护盾回血速度翻倍）、各自画一圈护盾、各自扣伤害。
         // 合并语义：半径取最大、回复速率相加、上限相加、冷却取最大。
         mindustry.entities.abilities.ForceFieldAbility mergedField = null;
+        // 【每个成员的武器作为一整组搬运】见下面排布那一大段注释。
+        Seq<Seq<Weapon>> groups = new Seq<>();
         for(int i = 0; i < members.size; i++){
             UnitPayload up = members.get(i);
             if(up == null || up.unit == null || up.unit.type == null) continue;
@@ -409,6 +411,7 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
                 }
                 ws.add(c);
             }
+            if(mws.size > 0) groups.add(mws);
             for(Ability a : t.abilities){
                 if(a instanceof mindustry.entities.abilities.ForceFieldAbility ff){
                     if(mergedField == null){
@@ -429,11 +432,24 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
 
         int n = ws.size;
         float rad = hitSize() * 0.55f;
-        for(int i = 0; i < n; i++){
-            Weapon w = ws.get(i);
-            float ang = i * 360f / n;
-            w.x = Angles.trnsx(ang, rad);
-            w.y = Angles.trnsy(ang, rad);
+        // 【每个成员的武器整组搬运，不许把"左右镜像对"摊成前后】
+        // 原版武器的 x 是横向偏移、y 是纵向偏移，镜像武器对（`otherSide`）就是 x 取反的一对
+        // （elude：x=±4, y=-2）。以前这里把"第 i 把武器"按序号摊到圆环上
+        // （ang = i*360/n，n = 武器总数）：2 只 elude = 4 把武器正好落在 0°/90°/180°/270°，
+        // 于是镜像的那对搭档一个被放到"右边"、另一个被放到"前面"——交替开火时一次从右边打、
+        // 一次从前面打（用户报的"左右对称的武器合体后变成前后的位置了"，表现就是"极其不精准的炮"，
+        // 子弹也不再从原来的枪口位置射出）。
+        // 现在：每个成员的武器保持**彼此之间的相对布局**（按体型缩放，同贴图口径），
+        // 只把这一整组平移到它的锚点上；只有一个成员时不加任何偏移（原样保留成员的武器布局）。
+        float sc = dominant == null ? 1f : Math.max(hitSize() / Math.max(dominant.hitSize, 1f), 1f);
+        for(int g = 0; g < groups.size; g++){
+            float ang = groups.size <= 1 ? 0f : g * 360f / groups.size;
+            float ax = groups.size <= 1 ? 0f : Angles.trnsx(ang, rad);
+            float ay = groups.size <= 1 ? 0f : Angles.trnsy(ang, rad);
+            for(Weapon w : groups.get(g)){
+                w.x = w.x * sc + ax;
+                w.y = w.y * sc + ay;
+            }
         }
         WeaponMount[] arr = new WeaponMount[n];
         for(int i = 0; i < n; i++){

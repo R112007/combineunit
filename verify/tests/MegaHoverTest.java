@@ -211,6 +211,36 @@ public class MegaHoverTest implements ApplicationListener{
             + " 挂载:" + sb);
     }
 
+    /**
+     * 【左右镜像对必须还是左右】用户报的"左右对称的武器合体后变成前后的位置了"：
+     * elude 的武器是左右镜像对（x=±4,y=-2）；老的 rebuildMounts 把"第 i 把武器"摊到圆环上
+     * （ang = i*360/n），2 只 elude 的 4 把武器正好落在 右/前/左/后 —— 镜像搭档被扯到相隔 90°，
+     * 于是交替开火时一次从右边、一次从前面射，看着就是"极其不精准的炮"。
+     * 这里按 otherSide 找出镜像搭档，量它们的相对几何：左右对应当 x 反号、|x| 接近、y 接近。
+     */
+    static void mirrorPairReport(String tag, Unit u){
+        if(u == null || u.mounts() == null) return;
+        WeaponMount[] ms = u.mounts();
+        int pairs = 0, good = 0;
+        StringBuilder sb = new StringBuilder();
+        for(int i = 0; i < ms.length; i++){
+            Weapon wi = ms[i].weapon;
+            if(wi == null || wi.otherSide < 0 || wi.otherSide >= ms.length) continue;
+            Weapon wo = ms[wi.otherSide].weapon;
+            pairs++;
+            sb.append("\n      [").append(i).append("] x=").append((int)wi.x).append(",y=").append((int)wi.y)
+              .append(" ↔ [").append(wi.otherSide).append("] x=").append((int)wo.x).append(",y=").append((int)wo.y);
+            // 【判据】镜像搭档（otherSide 互相指向）在成员身上是 x 反号的一对（横向排开）。
+            // 合体后"还是左右"= 两把的 y 基本相同、x 有明显差值；
+            // 被摊成前后则是 y 差很大、x 差不多（修前实测就是这样）。
+            float dx = Math.abs(wi.x - wo.x), dy = Math.abs(wi.y - wo.y);
+            boolean ok = dx > Math.max(1.5f, Math.abs(wi.x) * 0.2f) && dy <= Math.max(2f, dx * 0.35f);
+            if(ok) good++;
+        }
+        System.out.println("[MH] " + tag + " 镜像武器对 " + good + "/" + pairs + " 保持左右对称:" + sb);
+        if(pairs > 0) check("巨兽的左右镜像武器对没有被摊成前后（" + good + "/" + pairs + "）", good == pairs);
+    }
+
     @Override public void init(){
       try{
         Core.settings.setDataDirectory(Core.files.local(dataDir));
@@ -263,6 +293,7 @@ public class MegaHoverTest implements ApplicationListener{
         Unit solo = noAi(hover.create(Team.sharded), cx - 20f, cy);
         run(5);
         System.out.println("[MH] elude 挂载:" + mountWeaponFacts(solo));
+        mirrorPairReport("elude 本体（对照）", solo);
         fireReport("elude 本体（对照）", solo, enemy, 120);
         playerStyleReport("elude 本体（对照）", solo, enemy.x, enemy.y, 120);
         aiReport("elude 本体（对照）", solo, enemy, 60);
@@ -277,6 +308,7 @@ public class MegaHoverTest implements ApplicationListener{
             run(5);
             System.out.println("[MH] 巨兽 type.weapons（幽灵武器，仅供原版类型级判定）:" + weaponFacts(beast.type));
             System.out.println("[MH] 巨兽真实挂载:" + mountWeaponFacts(beast));
+            mirrorPairReport("巨兽（2 只 elude）", beast);
             fireReport("巨兽（含 2 只 elude）", beast, enemy, 120);
             // 玩家式瞄准：巨兽 vs 敌对靶子（只写 unit.aim + mount.shoot）
             playerStyleReport("巨兽", beast, enemy.x, enemy.y, 120);

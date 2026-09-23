@@ -34,7 +34,7 @@ done
 | `MegaEnvTest` | 埃里克尔地图（`Env.scorching\|terrestrial`）上合体不环境死亡：占位类型支持该环境、派生类型按成员推导（`envDisabled` 不含 scorching）、2 秒后仍存活 |
 | `MegaFieldTest` | 力场合并成 1 份（力墙条不超 100%）、引擎按体型缩放、`flyingLayer`/`clipSize` 不是 -1、船的水阻/速度、poly 建造速率 2×、指挥类型按 `type.id` 查回来是巨兽 |
 | `MegaWaterTest` | 用户报的"ElevationMoveUnit 的实体（elude）合体后淹死"：原版溺水判定一半看**类型**（`UnitEntity.canDrown() = isGrounded() && type.canDrown`），海军与悬浮单位（`ElevationMoveUnit`，elude：`flying=false`、`canDrown=false`）本来就不进溺水分支；巨兽实体是普通 `UnitEntity`、派生类型默认 `canDrown=true`，于是成员不淹、合体后开始淹（修前实测：合体 2 秒 `drownTime` 0.005→0.31，按 deep-water 的 `drownTime=200` 约 6 秒就该掉血/淹死）。现在派生类型的 `canDrown` 按成员**取交集**（有一台不淹就不淹）。四条断言：①单只 elude 在深水上不淹（前置）；②两只 elude 合体后 8 秒不死、不掉血、`drownTime` 一直是 0；③纯陆地编组（dagger×2）照旧会淹（没被一刀切成全体免淹）；④混合编组（elude + dagger）照样不淹 |
-| `MegaHoverTest` | 悬浮成员（ElevationMoveUnit / elude）与 cell 贴图三件事：①**cell**：原版 `UnitType.draw()` 的顺序是 `drawBody → if(drawCell) drawCell(unit) → drawWeapons`，巨兽派生类型把 `drawCell` 关了（绘制全在自定义 draw 里），自定义绘制里又没接这一段 → 成员有 cell、合体后没了（用户报的"组合巨兽没画 cell"；`cellRegionFor(dom)` 抽成了绘制与验证共用的判断）；②**液体状态**：原版 `UnitEntity.update()` 是 `if(isGrounded() && !type.hovering) apply(floor.status, …)` —— 悬浮单位靠 `type.hovering` 免掉液体 buff（wet/tarred…），巨兽派生类型从没设过这个字段 → 成员不吃、合体后全吃（用户报的"ElevationMoveUnit 在液体上不受液体 buff"）。现在按成员推导：全是悬浮/飞行/海军这类不贴地的编组才给 `hovering=true`，有真正贴地走的成员就按原版吃地形状态；③顺便量 elude 的导弹武器（MissileBulletType，homingPower=0.19）：本体与巨兽的子弹类型/首帧瞄准点偏差（0.0）/累计转向都一致（详见下方"未复现"一节） |
+| `MegaHoverTest` | 悬浮成员（ElevationMoveUnit / elude）与 cell 贴图四件事：①**cell**：原版 `UnitType.draw()` 的顺序是 `drawBody → if(drawCell) drawCell(unit) → drawWeapons`，巨兽派生类型把 `drawCell` 关了（绘制全在自定义 draw 里），自定义绘制里又没接这一段 → 成员有 cell、合体后没了（用户报的"组合巨兽没画 cell"；`cellRegionFor(dom)` 抽成了绘制与验证共用的判断）；②**液体状态**：原版 `UnitEntity.update()` 是 `if(isGrounded() && !type.hovering) apply(floor.status, …)` —— 悬浮单位靠 `type.hovering` 免掉液体 buff（wet/tarred…），巨兽派生类型从没设过这个字段 → 成员不吃、合体后全吃（用户报的"ElevationMoveUnit 在液体上不受液体 buff"）。现在按成员推导：全是悬浮/飞行/海军这类不贴地的编组才给 `hovering=true`，有真正贴地走的成员就按原版吃地形状态；③**镜像武器对**：镜像搭档（`otherSide`）必须保持横向排开（修前巨兽 0/4、修后 4/4）—— 用户报的 elude 武器变直线炮就是被摊成前后造成的（详见下方专节）；④elude 导弹的子弹类型/瞄准点/转向量本体与巨兽一致 |
 | `MegaMiningTest` | 矿工巨兽：物品容量=成员之和（90=3×30）、`drawMineBeam`、光束起点不是 -Inf、真的挖得到东西、成员表丢了也不退回占位类型 |
 | `MegaPayloadTest` | 巨兽能被原版载具装进载荷黑洞销毁；成员丢了的巨兽不能退化成占位类型（图标不变） |
 | `MegaStatSumTest` | 建造/挖矿速率按成员**量行为**累加（1/2/3 台 = 1×/2×/3×）；客户端按 `EntityMapping + readSync` 造出来的副本也一样；力场实例/展开状态不被快照重建 |
@@ -76,10 +76,25 @@ verify/run-client.sh mx /tmp/mp_unit/data shipmega   # 两艘 risso 在深水里
 驱动 mod（`verify/client/Driver.java`）的模式场景是从 combine 仓库搬过来的（拆仓后单位侧只在本仓库）；
 建筑侧那些模式（设置列表/CoopPanel/电网/科技树…）留在 combine 仓库的 Driver 里。
 
-## 未复现：elude 的导弹"合体后变直线炮"
+## elude 的导弹"合体后变直线炮"：**已复现并修好**（用户线索：左右镜像武器被摊成前后）
 
-用户报："elude 的武器合体后就变成极其不精准的炮了，本来子弹是拐弯的，合体后就纯直线了"。
-headless 里把几条路径都量了一遍，**巨兽与本体表现一致**，没能在离线环境复现：
+用户报："elude 的武器合体后就变成极其不精准的炮了，本来子弹是拐弯的，合体后就纯直线了"，
+并给出线索："可能是左右对称的武器合体后变成前后的位置了" —— 线索是对的。
+
+**根因**：`MegaUnitEntity.rebuildMounts()` 原来把"第 i 把武器"按序号摊到圆环上
+（`ang = i*360/武器总数`）。但原版武器布局里 `x` 是横向偏移、`y` 是纵向偏移，
+镜像武器对（`otherSide`，elude：`x=±4, y=-2`）就是 x 反号的一对。2 只 elude = 4 把武器，
+正好落在 0°/90°/180°/270° —— 镜像搭档一个被放到"右边"、另一个被放到"前面"，
+交替开火时一次从右边打、一次从前面打：看到的正是"极其不精准的炮"，
+子弹也不再从原来的枪口位置射出（拐弯的观感就没了）。实测：本体镜像对 2/2 正常，
+巨兽 **0/4**（配对两把的 x 差不多、y 差 ~一个环半径 = 被摊成前后）。
+
+**改法**：每个成员的武器作为**一整组**搬运 —— 保持它们彼此之间的相对布局（按体型缩放到与
+身体贴图同一比例），只把整组平移到自己的锚点上；只有一个成员时不加任何偏移（原样保留成员的武器布局）。
+修后实测巨兽 4 把武器的位置是 `x=14,2,-2,-14`（y 全为 -2）：每对镜像搭档仍然横向排开，
+镜像对 **4/4** 正常。
+
+以下是当初（还没拿到线索时）的量测记录，留着说明"只看子弹类型/瞄准点看不出问题"：
 
 | 量什么 | elude 本体 | elude 巨兽（2 只） |
 |---|---|---|
@@ -89,8 +104,8 @@ headless 里把几条路径都量了一遍，**巨兽与本体表现一致**，�
 | 强制锁定目标开火 120 tick | 64 颗子弹、平均累计转向 3300° | 124 颗、3349° |
 | 把敌人放进射程（自然瞄准/开火） | `unit.aim` 指到敌人、射击次数 +2 | 同样指到敌人、+4 |
 
-要定位这条还需要现场信息：那只巨兽是不是**玩家操控**（鼠标瞄准）？成员构成是什么
-（只有 elude，还是 elude + 别的单位）？装的是哪套模组（有没有会改武器/子弹的模组）？有录屏或截图最好。
+（这批量测说明：只看"子弹类型/首帧瞄准点/转向量"看不出问题 —— 问题在**枪口布局**上，
+得量"镜像搭档的相对位置"。）
 
 ## 3. 换 jar / 换版本
 
