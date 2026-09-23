@@ -455,10 +455,14 @@ public class MegaUnitType extends UnitType {
         // 于是"成员有 cell、合体后那块就没了"（用户报的"组合巨兽没画 cell"）。
         // 缩放口径与本体一致：Draw.scl 乘上体型缩放 s（cellRegion 的原版画法只用 region.scl()，
         // 乘一次 Draw.scl 就跟着整体等比放大）。
-        if (!isPayload && !bakedParts && cellRegionFor(dom) != null) {
+        // 【不跟 bakedParts 走】cell 一定要画：-full 整图里通常**没有** cell（生成整图时只画
+        // 躯干/武器），而且 cell 的血量脉冲（`cellColor` 里的 absin）是玩家判断"这单位快死了"的
+        // 重要视觉（用户报的"cell 在血量不足时的闪烁没画"）。万一某个 dom 的整图真含 cell，
+        // 最多是同一块 cell 画两遍（脉冲颜色一致，看不出来），比整块缺失/不闪好。
+        if (!isPayload && cellRegionFor(dom) != null) {
             float prevScl = Draw.scl;
             Draw.scl = prevScl * s;
-            Draw.z(z - 0.01f);
+            Draw.z(z);   // 与原版一致：cell 紧跟 drawBody 之后、同一 z（同一层里后画 = 盖在身体上）
             try {
                 dom.drawCell(unit);   // 原版画法：applyColor + cellColor + Draw.rect(cellRegion)
             } catch (Throwable ignored) {

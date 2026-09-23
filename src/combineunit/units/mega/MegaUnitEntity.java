@@ -432,23 +432,41 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
 
         int n = ws.size;
         float rad = hitSize() * 0.55f;
-        // 【每个成员的武器整组搬运，不许把"左右镜像对"摊成前后】
-        // 原版武器的 x 是横向偏移、y 是纵向偏移，镜像武器对（`otherSide`）就是 x 取反的一对
-        // （elude：x=±4, y=-2）。以前这里把"第 i 把武器"按序号摊到圆环上
-        // （ang = i*360/n，n = 武器总数）：2 只 elude = 4 把武器正好落在 0°/90°/180°/270°，
-        // 于是镜像的那对搭档一个被放到"右边"、另一个被放到"前面"——交替开火时一次从右边打、
-        // 一次从前面打（用户报的"左右对称的武器合体后变成前后的位置了"，表现就是"极其不精准的炮"，
-        // 子弹也不再从原来的枪口位置射出）。
-        // 现在：每个成员的武器保持**彼此之间的相对布局**（按体型缩放，同贴图口径），
-        // 只把这一整组平移到它的锚点上；只有一个成员时不加任何偏移（原样保留成员的武器布局）。
-        float sc = dominant == null ? 1f : Math.max(hitSize() / Math.max(dominant.hitSize, 1f), 1f);
-        for(int g = 0; g < groups.size; g++){
-            float ang = groups.size <= 1 ? 0f : g * 360f / groups.size;
-            float ax = groups.size <= 1 ? 0f : Angles.trnsx(ang, rad);
-            float ay = groups.size <= 1 ? 0f : Angles.trnsy(ang, rad);
-            for(Weapon w : groups.get(g)){
-                w.x = w.x * sc + ax;
-                w.y = w.y * sc + ay;
+        // 【武器围成一圈，但"左右不能串"】用户要求：保留"围着本体一圈"的排布，
+        // 但**原来在左边的武器要落在武器圆的左边、原来在右边的落在右边**。
+        // 原版武器 (x, y) 是"横向 / 纵向"偏移，镜像武器对（`otherSide`）就是 x 反号的一对
+        // （elude：x=±4, y=-2，方向角 -26.6° / -153.4°）。
+        //   · 以前按序号 i 摊到圆环上（ang = i*360/n）：2 只 elude 的 4 把武器落在
+        //     0°/90°/180°/270°，镜像搭档被拆成"右 + 前"（用户报的"左右对称的武器合体后
+        //     变成前后的位置了"，表现就是"极其不精准的炮"）。
+        //   · 也不能像"整组平移"那样只把两把往外挪：那样武器不围圈了。
+        // 现在：**把每个成员的武器当作一个整体刚性旋转**（旋转角 a 一律 < 90°），再落到圆环上 ——
+        //   每个成员一个锚点角，多个成员之间把小角度均匀铺开（span = 180*(M-1)/M），
+        //   于是：①每把武器都在圆环上（围一圈）；②成员内部左右/前后的相对关系不变
+        //   （旋转 <90° 时 x 的符号不会翻，镜像搭档仍然一左一右）；③不同成员的武器不会重叠。
+        if(n > 0){
+            int groupsN = Math.max(groups.size, 1);
+            float span = 180f * Math.max(groupsN - 1, 0) / groupsN;
+            for(int g = 0; g < groups.size; g++){
+                float a = groupsN <= 1 ? 0f : ((g / (float)(groupsN - 1)) - 0.5f) * span;
+                for(Weapon w : groups.get(g)){
+                    float len = Mathf.len(w.x, w.y);
+                    // 注意：arc 的 Mathf.atan2 参数序是 (x, y) 而且返回**弧度**；
+                    // 这里要的是"度"，直接用标准库算，别踩这个坑。
+                    float ang = (len < 0.001f ? 0f : (float)Math.toDegrees(Math.atan2(w.y, w.x))) + a;
+                    w.x = Mathf.cosDeg(ang) * rad;
+                    w.y = Mathf.sinDeg(ang) * rad;
+                }
+            }
+            // 兜底：万一有个成员一把武器都没有（groups 为空），把它按老办法摊开，
+            // 至少保证武器都在圆上、不重叠。
+            if(groups.isEmpty()){
+                for(int i = 0; i < n; i++){
+                    Weapon w = ws.get(i);
+                    float ang = i * 360f / n;
+                    w.x = Mathf.cosDeg(ang) * rad;
+                    w.y = Mathf.sinDeg(ang) * rad;
+                }
             }
         }
         WeaponMount[] arr = new WeaponMount[n];

@@ -212,33 +212,85 @@ public class MegaHoverTest implements ApplicationListener{
     }
 
     /**
-     * 【左右镜像对必须还是左右】用户报的"左右对称的武器合体后变成前后的位置了"：
-     * elude 的武器是左右镜像对（x=±4,y=-2）；老的 rebuildMounts 把"第 i 把武器"摊到圆环上
-     * （ang = i*360/n），2 只 elude 的 4 把武器正好落在 右/前/左/后 —— 镜像搭档被扯到相隔 90°，
-     * 于是交替开火时一次从右边、一次从前面射，看着就是"极其不精准的炮"。
-     * 这里按 otherSide 找出镜像搭档，量它们的相对几何：左右对应当 x 反号、|x| 接近、y 接近。
+     * 【围一圈 + 左右不串】用户要求：武器仍然围着本体一圈，但"原来在左边的在圆的左边、
+     * 原来在右边的在圆的右边"。可观测的不变量：
+     *   ①每把武器都落在圆环上（到本体中心距离 ≈ hitSize*0.55，误差 < 8%）；
+     *   ②镜像搭档（otherSide 互相指向，原版就是 x 取反的一对）必须落在圆的**两侧**
+     *     （横向坐标反号）—— 修前它们被摊成"右/前"（一个 x>0、一个 x≈0），这条会挂；
+     *   ③没有两把武器重叠在同一个槽位。
      */
-    static void mirrorPairReport(String tag, Unit u){
+    /** 采样 cellColor 的亮度，返回脉冲幅度（max-min）。低血量时原版 cell 会闪，幅度应明显 > 0。 */
+    static float cellFlashAmp(UnitType dom, Unit u, int ticks){
+        float min = 9f, max = -9f;
+        for(int i = 0; i < ticks; i++){
+            arc.graphics.Color c = dom.cellColor(u);
+            float b = (c.r + c.g + c.b) / 3f;
+            min = Math.min(min, b); max = Math.max(max, b);
+            run(1);
+        }
+        return max - min;
+    }
+
+    static void weaponRingReport(String tag, Unit u, Weapon[] origOf){
         if(u == null || u.mounts() == null) return;
         WeaponMount[] ms = u.mounts();
-        int pairs = 0, good = 0;
+        if(ms.length == 0) return;
+        float rad = u.hitSize() * 0.55f;
+        int mirror = 0, mirrorOpposite = 0, onRing = 0, overlaps = 0, sideKept = 0, sideTotal = 0;
         StringBuilder sb = new StringBuilder();
         for(int i = 0; i < ms.length; i++){
             Weapon wi = ms[i].weapon;
-            if(wi == null || wi.otherSide < 0 || wi.otherSide >= ms.length) continue;
+            float len = arc.math.Mathf.len(wi.x, wi.y);
+            if(Math.abs(len - rad) <= Math.max(rad * 0.08f, 1.5f)) onRing++;
+            for(int j = i + 1; j < ms.length; j++){
+                Weapon wj = ms[j].weapon;
+                if(arc.math.Mathf.dst(wi.x, wi.y, wj.x, wj.y) < Math.max(rad * 0.2f, 1.5f)) overlaps++;
+            }
+            if(wi.otherSide < 0 || wi.otherSide >= ms.length) continue;
+            mirror++;
             Weapon wo = ms[wi.otherSide].weapon;
-            pairs++;
+            boolean sideOk = (wi.x > 0.001f && wo.x < -0.001f) || (wi.x < -0.001f && wo.x > 0.001f);
+            if(sideOk) mirrorOpposite++;
+            if(origOf != null){
+                Weapon ow = origOf[i % origOf.length];
+                if(Math.abs(ow.x) > 0.5f){
+                    sideTotal++;
+                    if(Math.signum(wi.x) == Math.signum(ow.x)) sideKept++;
+                }
+                sb.append(" [原 (").append((int)ow.x).append(",").append((int)ow.y).append(")");
+            } else sb.append(" [原 -");
             sb.append("\n      [").append(i).append("] x=").append((int)wi.x).append(",y=").append((int)wi.y)
-              .append(" ↔ [").append(wi.otherSide).append("] x=").append((int)wo.x).append(",y=").append((int)wo.y);
-            // 【判据】镜像搭档（otherSide 互相指向）在成员身上是 x 反号的一对（横向排开）。
-            // 合体后"还是左右"= 两把的 y 基本相同、x 有明显差值；
-            // 被摊成前后则是 y 差很大、x 差不多（修前实测就是这样）。
-            float dx = Math.abs(wi.x - wo.x), dy = Math.abs(wi.y - wo.y);
-            boolean ok = dx > Math.max(1.5f, Math.abs(wi.x) * 0.2f) && dy <= Math.max(2f, dx * 0.35f);
-            if(ok) good++;
+              .append(" ↔ [").append(wi.otherSide).append("] x=").append((int)wo.x).append(",y=").append((int)wo.y)
+              .append(" 左右分居=").append(sideOk);
         }
-        System.out.println("[MH] " + tag + " 镜像武器对 " + good + "/" + pairs + " 保持左右对称:" + sb);
-        if(pairs > 0) check("巨兽的左右镜像武器对没有被摊成前后（" + good + "/" + pairs + "）", good == pairs);
+        System.out.println("[MH] " + tag + " 武器圆: 在圆环上 " + onRing + "/" + ms.length
+            + "、镜像搭档分居两侧 " + mirrorOpposite + "/" + mirror + "、左右不串 " + sideKept + "/" + sideTotal
+            + "、重叠 " + overlaps + "；圆半径=" + (int)rad + sb);
+        if(sideTotal > 0) check("原来在左/右的武器合体后仍在圆的同一侧（" + sideKept + "/" + sideTotal + "）", sideKept == sideTotal);
+        if(mirror > 0) check("镜像武器对在圆上左右分居（" + mirrorOpposite + "/" + mirror + "）", mirrorOpposite == mirror);
+        check("武器没有重叠在同一槽位（重叠 " + overlaps + "）", overlaps == 0);
+        if(u.getClass().getName().equals("combineunit.units.mega.MegaUnitEntity"))
+            check("所有武器都在武器圆上（" + onRing + "/" + ms.length + "）", onRing == ms.length);
+    }
+
+    /**
+     * 【cell 的低血量闪烁】原版 `cellColor(unit)` 里有一段
+     * `Mathf.absin(Time.time, f*5f, 1f) * (1f-f)`（f = 血量比例）—— 血量不满时 cell 的颜色
+     * 会随帧脉冲（玩家看到的"受伤闪烁"）。这里按帧采样 cellColor 的亮度，量脉冲幅度：
+     * 满血应该几乎不变，低血量应该有明显波动（≥ 0.05）。
+     */
+    static void cellFlashReport(String tag, UnitType dom, Unit u, int ticks){
+        float min = 9f, max = -9f;
+        for(int i = 0; i < ticks; i++){
+            arc.graphics.Color c = dom.cellColor(u);
+            float b = (c.r + c.g + c.b) / 3f;
+            min = Math.min(min, b); max = Math.max(max, b);
+            run(1);
+        }
+        System.out.println("[MH] " + tag + " cell 亮度: " + String.format("%.3f", min) + " ~ "
+            + String.format("%.3f", max) + "（脉冲幅度 " + String.format("%.3f", max - min) + "，血量 "
+            + (int)(u.healthf() * 100) + "%）");
+        return; // 判定在调用处统一做
     }
 
     @Override public void init(){
@@ -293,7 +345,7 @@ public class MegaHoverTest implements ApplicationListener{
         Unit solo = noAi(hover.create(Team.sharded), cx - 20f, cy);
         run(5);
         System.out.println("[MH] elude 挂载:" + mountWeaponFacts(solo));
-        mirrorPairReport("elude 本体（对照）", solo);
+        weaponRingReport("elude 本体（对照）", solo, null);
         fireReport("elude 本体（对照）", solo, enemy, 120);
         playerStyleReport("elude 本体（对照）", solo, enemy.x, enemy.y, 120);
         aiReport("elude 本体（对照）", solo, enemy, 60);
@@ -308,7 +360,7 @@ public class MegaHoverTest implements ApplicationListener{
             run(5);
             System.out.println("[MH] 巨兽 type.weapons（幽灵武器，仅供原版类型级判定）:" + weaponFacts(beast.type));
             System.out.println("[MH] 巨兽真实挂载:" + mountWeaponFacts(beast));
-            mirrorPairReport("巨兽（2 只 elude）", beast);
+            weaponRingReport("巨兽（2 只 elude）", beast, UnitTypes.elude.weapons.toArray(mindustry.type.Weapon.class));
             fireReport("巨兽（含 2 只 elude）", beast, enemy, 120);
             // 玩家式瞄准：巨兽 vs 敌对靶子（只写 unit.aim + mount.shoot）
             playerStyleReport("巨兽", beast, enemy.x, enemy.y, 120);
@@ -347,6 +399,28 @@ public class MegaHoverTest implements ApplicationListener{
                     + " type.hovering=" + hoverBeast.type.hovering);
                 check("巨兽（悬浮成员）也不吃液体状态（用户报的「受液体 buff」）", !beastAffected);
             }
+        }
+
+        // ---------- ③ cell 的低血量闪烁：单独 crawler vs crawler 巨兽（都压到 30% 血） ----------
+        Unit crawlLow = UnitTypes.crawler.create(Team.sharded);
+        crawlLow.set(cx - 60f, cy + 60f);
+        crawlLow.add();
+        crawlLow.health(crawlLow.maxHealth() * 0.3f);
+        run(5);
+        float loneAmp = cellFlashAmp(UnitTypes.crawler, crawlLow, 90);
+        System.out.println("[MH] 单独 crawler（30% 血）cell 脉冲幅度=" + String.format("%.3f", loneAmp));
+        check("单独 crawler 低血量时 cell 在闪（脉冲幅度 > 0.05）", loneAmp > 0.05f);
+        crawlLow.remove();
+        run(5);
+        Unit crawlBeastLow = mergeAt(cx + 60f, cy + 60f, UnitTypes.crawler, UnitTypes.crawler);
+        if(crawlBeastLow == null) check("两只 crawler 能融合（前置）", false);
+        else{
+            crawlBeastLow.health(crawlBeastLow.maxHealth() * 0.3f);
+            run(5);
+            float beastAmp = cellFlashAmp(UnitTypes.crawler, crawlBeastLow, 90);
+            System.out.println("[MH] crawler 巨兽（30% 血）cell 脉冲幅度=" + String.format("%.3f", beastAmp)
+                + " healthf=" + crawlBeastLow.healthf());
+            check("巨兽低血量时 cell 也要闪（脉冲幅度 > 0.05）", beastAmp > 0.05f);
         }
 
         System.out.println("[MH] RESULT " + (fail==0?"ALL PASS":(fail+" FAILED")) + " (pass="+pass+")");

@@ -132,7 +132,11 @@ public class Driver extends Mod{
                 Timer.schedule(() -> shot("hover_before"), 18f);
                 Timer.schedule(Driver::hoverMerge, 22f);
                 Timer.schedule(() -> shot("hover_cell"), 28f);
-                Timer.schedule(() -> { Log.info("[drv] hover 模式结束 frames=@", frames); Core.app.exit(); }, 34f);
+                // cell 的"低血量闪烁"：把巨兽压到 30% 血，隔几帧拍两张（脉冲来自 cellColor 里的 absin）
+                Timer.schedule(Driver::hoverDamage, 30f);
+                Timer.schedule(() -> shot("hover_flash_a"), 32f);
+                Timer.schedule(() -> shot("hover_flash_b"), 33.2f);
+                Timer.schedule(() -> { Log.info("[drv] hover 模式结束 frames=@", frames); Core.app.exit(); }, 36f);
             }else{
                 Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega）", mode);
                 Core.app.exit();
@@ -916,6 +920,26 @@ public class Driver extends Mod{
             Log.info("[drv] hover 场景: 单独 elude=(@,@) 单独 crawler=(@,@) elude 巨兽=@ crawler 巨兽=@",
                 (int)hoverSolo.x, (int)hoverSolo.y, (int)crawlSolo.x, (int)crawlSolo.y, hoverBeast != null, crawlBeast != null);
         }catch(Throwable t){ Log.err("[drv] setupHoverScene failed", t); }
+    }
+
+    /** 没有 AI 的控制器：把巨兽钉住，好让"低血量 cell 闪烁"的两张截图在同一个位置。 */
+    static class NoopController implements mindustry.entities.units.UnitController{
+        Unit u;
+        @Override public void unit(Unit u){ this.u = u; }
+        @Override public Unit unit(){ return u; }
+    }
+
+    static void hoverDamage(){
+        // 两个巨兽都压到 30% 血：cell 的低血量脉冲（cellColor 里的 absin）应当看得见
+        for(Unit u : new Unit[]{hoverBeast, crawlBeast}){
+            if(u != null && u.isAdded()){
+                u.health(u.maxHealth() * 0.3f);
+                u.controller(new NoopController());   // 冻住，别在两张截图之间跑掉
+                u.vel.setZero();
+            }
+        }
+        Log.info("[drv] hover: 巨兽已压到 30% 血（elude=@ crawler=@）",
+            hoverBeast == null ? "-" : (int)hoverBeast.health(), crawlBeast == null ? "-" : (int)crawlBeast.health());
     }
 
     static void cellFacts(String name, UnitType t){
