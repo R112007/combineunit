@@ -18,12 +18,12 @@ verify/make-dataset.sh /tmp/mp_unit/data      # 产物 build/libs/combineunit.ja
 combine 的那一份，本仓库的改动根本没被验到。`run-headless.sh` / `run-client.sh` 只要看到
 `data/mods/combine.jar` 就直接拒绝（exit 4）。
 
-## 1. headless 逻辑测试（11 项）
+## 1. headless 逻辑测试（12 项）
 
 ```bash
-for t in SanityCheck MegaEnvTest MegaFieldTest MegaMiningTest MegaPayloadTest MegaStatSumTest \
-         MegaSurviveTest MegaSyncTest MegaGhostMemberTest MegaClipSizeTest MegaGhostTest \
-         ComboFireSupportTest; do
+for t in SanityCheck MegaEnvTest MegaFieldTest MegaWaterTest MegaMiningTest MegaPayloadTest \
+         MegaStatSumTest MegaSurviveTest MegaSyncTest MegaGhostMemberTest MegaClipSizeTest \
+         MegaGhostTest ComboFireSupportTest; do
   verify/run-headless.sh mx /tmp/mp_unit/data combineunit.dbg.$t
 done
 ```
@@ -33,6 +33,7 @@ done
 | `SanityCheck` | 防呆：模组真的加载、三种巨兽类型建出来了、巨兽实体类登记在**固定槽 250**、原版单位实体被换成本仓库的镜像类（`dagger` → `combineunit.units.entities.CMechUnit`）。每个 run-headless 前自动跑 |
 | `MegaEnvTest` | 埃里克尔地图（`Env.scorching\|terrestrial`）上合体不环境死亡：占位类型支持该环境、派生类型按成员推导（`envDisabled` 不含 scorching）、2 秒后仍存活 |
 | `MegaFieldTest` | 力场合并成 1 份（力墙条不超 100%）、引擎按体型缩放、`flyingLayer`/`clipSize` 不是 -1、船的水阻/速度、poly 建造速率 2×、指挥类型按 `type.id` 查回来是巨兽 |
+| `MegaWaterTest` | 用户报的"ElevationMoveUnit 的实体（elude）合体后淹死"：原版溺水判定一半看**类型**（`UnitEntity.canDrown() = isGrounded() && type.canDrown`），海军与悬浮单位（`ElevationMoveUnit`，elude：`flying=false`、`canDrown=false`）本来就不进溺水分支；巨兽实体是普通 `UnitEntity`、派生类型默认 `canDrown=true`，于是成员不淹、合体后开始淹（修前实测：合体 2 秒 `drownTime` 0.005→0.31，按 deep-water 的 `drownTime=200` 约 6 秒就该掉血/淹死）。现在派生类型的 `canDrown` 按成员**取交集**（有一台不淹就不淹）。四条断言：①单只 elude 在深水上不淹（前置）；②两只 elude 合体后 8 秒不死、不掉血、`drownTime` 一直是 0；③纯陆地编组（dagger×2）照旧会淹（没被一刀切成全体免淹）；④混合编组（elude + dagger）照样不淹 |
 | `MegaMiningTest` | 矿工巨兽：物品容量=成员之和（90=3×30）、`drawMineBeam`、光束起点不是 -Inf、真的挖得到东西、成员表丢了也不退回占位类型 |
 | `MegaPayloadTest` | 巨兽能被原版载具装进载荷黑洞销毁；成员丢了的巨兽不能退化成占位类型（图标不变） |
 | `MegaStatSumTest` | 建造/挖矿速率按成员**量行为**累加（1/2/3 台 = 1×/2×/3×）；客户端按 `EntityMapping + readSync` 造出来的副本也一样；力场实例/展开状态不被快照重建 |

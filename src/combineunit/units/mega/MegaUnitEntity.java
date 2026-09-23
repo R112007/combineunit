@@ -572,6 +572,7 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         //（Planets.erekir.defaultEnv）→ UnitComp.update() 里 `!type.supportsEnv(...)` 成立
         // → Call.unitEnvDeath → 合体当场死。
         int envOn = 0, envOff = ~0, envReq = ~0;
+        boolean drownAllowed = true;
         for(UnitType t : tally.keys()){
             // 【按成员个数加权】这里 tally 是按"类型"遍历的（每种类型只来一次），
             // 所以求和必须乘上该类型的成员数 —— 原来只加一次、计数却按成员数，
@@ -600,10 +601,20 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             envOn |= t.envEnabled;
             envOff &= t.envDisabled;
             envReq &= t.envRequired;
+            // 【别淹死】原版溺水判定一半看**类型**：`UnitEntity.canDrown() = isGrounded() &&
+            // type.canDrown`，而海军（WaterMove）与悬浮单位（ElevationMoveUnit，例如 elude）
+            // 的 `type.canDrown` 本来就是 false —— 它们根本不进溺水分支。
+            // 巨兽实体是普通 UnitEntity、派生类型默认 canDrown=true，于是"成员本来不淹、
+            // 合体后开始淹"（用户报的"elude 合体后淹死"：实测 drownTime 2 秒涨到 0.31，
+            // 按 deep-water 的 drownTime=200 算 6 秒出头就该掉血/淹死）。
+            // 口径与其它能力一致：成员里**只要有一台不淹**（海军/悬浮/飞行/别的模组的不淹单位），
+            // 合体就不淹 —— 能力取并集；纯陆地编组保留原版溺水判定（不能一刀切成全体免淹）。
+            if(!t.canDrown) drownAllowed = false;
         }
         if(envOn != 0) ct.envEnabled = envOn;
         if(envOff != ~0) ct.envDisabled = envOff;
         if(envReq != ~0) ct.envRequired = envReq;
+        ct.canDrown = drownAllowed;
         ct.speed = spdCount > 0 ? Math.max(spd / spdCount, 0.3f) : 0.8f;
         ct.mineTier = tier;
         ct.mineSpeed = mineSpd;
