@@ -1022,6 +1022,16 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             if(m == null || m.id() == 0) continue;
             Unit ghost = Groups.unit.getByID(m.id());
             if(ghost != null && ghost != this && ghost.type == m.type){
+                // 【不能只按 id + 类型判幽灵】实体 id 就是 EntityGroup 的空位下标：服务端把成员
+                // 移出世界后这些 id **立刻会被新单位复用**（还是 LIFO —— 常常正好是刚合掉的
+                // 那两个），新单位类型也常常一样（工厂产的同型单位）。只按 (id, 类型) 摘人，
+                // 就会把刚生出来的正经单位删掉：客户端删掉 → 下一帧快照又建回来 → 再被删……
+                // 玩家看到的就是"一闪一闪的幽灵单位" / 单位忽隐忽现。
+                // 真幽灵的指纹是**位置**：它从合体那一刻起就没再被服务端动过，停在成员封存时的坐标；
+                // 而新单位是刚出生/刚生产出来的，位置对不上。玩家操控的单位一律不碰。
+                if(ghost.isPlayer()) continue;
+                float tolerance = Math.max(Math.max(ghost.hitSize, m.hitSize), 8f) + 16f;
+                if(m.dst(ghost) > tolerance) continue;
                 ghost.remove();
                 removed++;
                 Log.info("[combine] 摘掉幽灵成员 @（已属于组合巨兽 @）", m.id(), id);

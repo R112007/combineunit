@@ -14,6 +14,7 @@ import mindustry.entities.Predict;
 import mindustry.entities.Mover;
 import mindustry.game.EventType.Trigger;
 import mindustry.gen.Bullet;
+import mindustry.gen.Building;
 import mindustry.gen.Entityc;
 import mindustry.gen.Groups;
 import mindustry.entities.Sized;
@@ -52,6 +53,22 @@ public class UnitComboFire{
         Events.run(Trigger.update, UnitComboFire::update);
     }
 
+    /**
+     * 这个目标是不是"可以开火打"的：**必须不是自己队**。
+     * 建造/维修类武器跟踪的是己方建筑，队友/自己的建筑绝不能被当成代打目标。
+     */
+    static boolean hostileTo(Unit u, Teamc t){
+        if(u == null || t == null || t.team() == null) return false;
+        return t.team() != u.team();
+    }
+
+    /** 瞄准点是不是压在**己方建筑**上（玩家长按自家房子维修/建造时的代打保护）。 */
+    static boolean friendlyBuildingAt(Unit u, float x, float y){
+        if(u == null || Vars.world == null) return false;
+        Building b = Vars.world.buildWorld(x, y);
+        return b != null && b.team == u.team();
+    }
+
     static void update(){
         if(!enabled || !UnitComboDamage.enabled || Vars.state.isMenu()) return;
         // 客户端不结算子弹（由服务端创建后同步），与承伤/修复同一规则
@@ -72,9 +89,14 @@ public class UnitComboFire{
             if(gid == 0.0) continue;
 
             // 借出方目标：优先取 U 自己武器正在跟踪的目标；没有（玩家瞄准型）就用 U 的瞄准点
+            // 【只借去打敌人】目标的团队必须不是自己队 —— 建造/维修类武器（MultiBuildWeapon、
+            // RepairBeamWeapon）跟踪的是**己方建筑**，玩家长按维修时瞄准点也压在己方建筑上；
+            // 照着打就会把同组其他武器的火力引到己方建筑上（用户报的"mega 武器去修复建筑的
+            // 时候，其他武器的开火会损坏己方建筑"）。实测（MegaRepairFireTest）：只按
+            // "mount.shoot && mount.target != null" 取目标时，己方半血墙会被借火打 14 发。
             Teamc target = null;
             for(WeaponMount um : u.mounts()){
-                if(um.shoot && um.target != null){
+                if(um.shoot && um.target != null && hostileTo(u, um.target)){
                     target = um.target;
                     break;
                 }
@@ -91,6 +113,12 @@ public class UnitComboFire{
 
     /** 把 m 的空闲且就绪的武器借给 u 发射一轮（持续型武器走 {@link #lendContinuous}）。 */
     private static void lend(Unit u, Unit m, Teamc target){
+        // 【兜底】非敌方目标一律不借：目标模式（mount.target）走的是调用方的过滤，
+        // 但"没有目标、只有瞄准点"那一路（玩家长按）会走到下面用 u.aimX/aimY 的分支 ——
+        // 玩家指着己方建筑修/造时，瞄准点就在己方建筑上，借出的武器会照着它开火。
+        if(target != null && !hostileTo(u, target)) return;
+        if(target == null && friendlyBuildingAt(u, u.aimX, u.aimY)) return;
+
         arc.struct.Seq<Weapon> weapons = m.type.weapons;
         WeaponMount[] mounts = m.mounts();
         for(int i = 0; i < weapons.size && i < mounts.length; i++){

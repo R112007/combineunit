@@ -150,6 +150,38 @@ public class MegaGhostMemberTest implements ApplicationListener{
             check("同 id 但类型不同 → 不摘（防 id 复用误删）",
                 Groups.unit.getByID(idA) == sameIdOtherType && sameIdOtherType.isAdded());
 
+            // ---- 【用户报的"客户端生成幽灵单位"】同 id **同类型**、但是新造出来的正经单位 ----
+            // 实体 id 是 EntityGroup 的空位下标：成员被收进巨兽后，服务端立刻会用这些 id 造新单位
+            // （LIFO，常常正好是刚合掉的那两个；类型也常常一样 —— 工厂产的同型单位）。
+            // 只按 (id, 类型) 判幽灵，就会把这只新单位删掉：客户端删 → 下一帧快照建回来 → 再删……
+            // 画面就是"一闪一闪的幽灵单位"。真幽灵的指纹是**位置**（它停在成员封存时的坐标）。
+            sameIdOtherType.remove();
+            run(3);
+            Unit recycled = UnitTypes.dagger.create(Team.sharded);
+            recycled.set(ox * 8f + 120f, oy * 8f + 120f);   // 出生点离合体位置较远（= 新造出来的）
+            recycled.id(idA);                               // 复用了"成员 A"的 id，类型也一样
+            recycled.add();
+            // 玩家操控的单位刚好复用了成员的 id（Unit.isPlayer() = controller 是 Player 实体）
+            Unit playerUnit = UnitTypes.dagger.create(Team.sharded);
+            playerUnit.set(ox * 8f - 120f, oy * 8f - 120f);
+            playerUnit.id(idB);
+            playerUnit.add();
+            run(3);
+            // 控制器要在 run() **之后**再挂：原版每帧会把"无效控制器"换回 AI 控制器，
+            // 挂着假 Player 跑帧会被顶掉（这里只验 removeGhostMembers 见到 isPlayer 时的行为）
+            mindustry.gen.Player fakePlayer = mindustry.gen.Player.create();
+            fakePlayer.unit(playerUnit);
+            playerUnit.controller(fakePlayer);
+            int removed3 = removeGhosts(mega);
+            System.out.println("[MGM] id 复用（同类型的新单位 / 玩家自己的单位）：摘掉 " + removed3 + " 只；"
+                + "新单位还在=" + (Groups.unit.getByID(idA) == recycled && recycled.isAdded())
+                + " 玩家单位还在=" + (playerUnit.isAdded() && Groups.unit.getByID(idB) == playerUnit)
+                + "（isPlayer=" + playerUnit.isPlayer() + "）");
+            check("id 复用出来的**新单位**（位置对不上）不能被当幽灵摘掉",
+                Groups.unit.getByID(idA) == recycled && recycled.isAdded());
+            check("玩家操控的单位不会被当幽灵摘掉（isPlayer=" + playerUnit.isPlayer() + "）",
+                playerUnit.isAdded() && Groups.unit.getByID(idB) == playerUnit);
+
             System.out.println("[MGM] RESULT " + (fail == 0 ? "ALL PASS" : (fail + " FAILED")) + " (pass=" + pass + ")");
             System.exit(fail == 0 ? 0 : 1);
         }catch(Throwable t){
