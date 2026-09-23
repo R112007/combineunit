@@ -223,6 +223,19 @@ public class MegaUnitType extends UnitType {
         return f;
     }
 
+
+    /**
+     * 这个代表类型"该不该补画 cell、补画哪张"：{@code null} = 不画。
+     *
+     * <p>判断原版口径一致：{@code drawCell} 开着 + 有 {@code cellRegion} 且图集里真找得到
+     * （很多单位没有 {@code -cell} 贴图，`find()` 会给出"找不到"的占位 region）。
+     * 抽成方法是为了让绘制与验证（测试/驱动）用同一份判断，别各写一份。
+     */
+    public static TextureRegion cellRegionFor(UnitType dom){
+        if(dom == null || !dom.drawCell || dom.cellRegion == null) return null;
+        return Core.atlas != null && Core.atlas.isFound(dom.cellRegion) ? dom.cellRegion : null;
+    }
+
     /** 躯干图（region → UI 图标）。 */
     static TextureRegion torsoArt(UnitType dom) {
         if (dom == null) return null;
@@ -433,6 +446,26 @@ public class MegaUnitType extends UnitType {
         if (region != null && Core.atlas.isFound(region)) {
             Draw.rect(region, unit.x, unit.y,
                     region.width * s * Draw.scl, region.height * s * Draw.scl, unit.rotation - 90);
+        }
+
+        // 【cell 贴图】原版 `UnitType.draw` 的顺序是
+        //   drawEngines → Draw.z(z) → drawBody → `if(drawCell) drawCell(unit)` → drawWeapons，
+        // 中间那段 cell（`cellRegion`：爬虫/腿/悬浮这类单位的底盘/舱体）必须自己接上 ——
+        // 巨兽的派生类型把 `drawCell` 关了（绘制全在自定义 draw 里，见 applyLateDefaults），
+        // 于是"成员有 cell、合体后那块就没了"（用户报的"组合巨兽没画 cell"）。
+        // 缩放口径与本体一致：Draw.scl 乘上体型缩放 s（cellRegion 的原版画法只用 region.scl()，
+        // 乘一次 Draw.scl 就跟着整体等比放大）。
+        if (!isPayload && !bakedParts && cellRegionFor(dom) != null) {
+            float prevScl = Draw.scl;
+            Draw.scl = prevScl * s;
+            Draw.z(z - 0.01f);
+            try {
+                dom.drawCell(unit);   // 原版画法：applyColor + cellColor + Draw.rect(cellRegion)
+            } catch (Throwable ignored) {
+            } finally {
+                Draw.scl = prevScl;
+                Draw.reset();
+            }
         }
         Draw.reset();
 

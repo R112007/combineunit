@@ -120,6 +120,19 @@ public class Driver extends Mod{
                         legsRef == null ? -1f : legsRef.hitSize());
                 }, 28f);
                 Timer.schedule(() -> { Log.info("[drv] mech 模式结束 frames=@", frames); Core.app.exit(); }, 36f);
+            }else if(mode.equals("hover")){
+                // 用户报的"组合巨兽没画 cell"，以及"ElevationMoveUnit 在液体上不吃液体 buff"的对照：
+                // 场景里并排摆 单独 elude / elude 巨兽 / 单独 crawler / crawler 巨兽，
+                // 放大镜头截一张图看 cell（底盘那块贴图）在不在、比例对不对。
+                installFrameCounter();
+                installCameraLock();
+                keepDialogsHidden();
+                Timer.schedule(Driver::setupHoverScene, 5f);
+                Timer.schedule(Driver::hoverCenter, 6f, 0.5f, 60);
+                Timer.schedule(() -> shot("hover_before"), 18f);
+                Timer.schedule(Driver::hoverMerge, 22f);
+                Timer.schedule(() -> shot("hover_cell"), 28f);
+                Timer.schedule(() -> { Log.info("[drv] hover 模式结束 frames=@", frames); Core.app.exit(); }, 34f);
             }else{
                 Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega）", mode);
                 Core.app.exit();
@@ -861,6 +874,91 @@ public class Driver extends Mod{
         return null;
     }
 
+
+    // ---------------- hover / cell（悬浮单位与 cell 贴图） ----------------
+    static Unit hoverSolo, crawlSolo, hoverBeast, crawlBeast;
+
+    static void setupHoverScene(){
+        try{
+            hideDialogs();
+            var map = Vars.maps.all().find(m -> m.name().contains("Archipelago"));
+            Vars.world.loadMap(map, map.applyRules(Gamemode.survival));
+            Vars.state.rules.canGameOver = false;
+            Vars.state.rules.waves = false;
+            Vars.state.rules.fog = false;
+            Vars.state.rules.staticFog = false;
+            Vars.logic.play();
+            for(int y=40;y<130;y++) for(int x=30;x<200;x++){ Tile t=Vars.world.tile(x,y); if(t!=null && t.block()!=Blocks.air) t.setBlock(Blocks.air); }
+            int ox=-1, oy=-1;
+            outer:
+            for(int y=45;y<120;y++) for(int x=40;x<190;x++){
+                boolean ok = true;
+                for(int dy=-3;dy<=3 && ok;dy++) for(int dx=-6;dx<=6;dx++){
+                    Tile t = Vars.world.tile(x+dx, y+dy);
+                    if(t == null || t.floor() == null || t.floor().isLiquid || t.block() != Blocks.air){ ok = false; break; }
+                }
+                if(ok){ ox=x; oy=y; break outer; }
+            }
+            if(ox < 0){ Log.err("[drv] hover: 没找到陆地"); return; }
+            Building core = placeBL(Blocks.coreShard, ox + 14, oy + 8);
+            if(core != null && core.items != null) for(Item it : Vars.content.items()) core.items.set(it, 5000);
+            float cx = ox * 8f, cy = oy * 8f;
+            // 一排摆好：单独 elude、单独 crawler（融合后巨兽插到各自右边）
+            hoverSolo = UnitTypes.elude.create(Team.sharded);   hoverSolo.set(cx - 135f, cy); hoverSolo.add();
+            crawlSolo = UnitTypes.crawler.create(Team.sharded); crawlSolo.set(cx + 15f, cy); crawlSolo.add();
+            camTarget = hoverSolo;
+            Vars.renderer.setScale(2.5f);
+            Core.camera.position.set(cx, cy);
+            cellFacts("elude", UnitTypes.elude);
+            cellFacts("crawler", UnitTypes.crawler);
+            cellFacts("spiroct", UnitTypes.spiroct);
+            cellFacts("dagger", UnitTypes.dagger);
+            Log.info("[drv] hover 场景: 单独 elude=(@,@) 单独 crawler=(@,@) elude 巨兽=@ crawler 巨兽=@",
+                (int)hoverSolo.x, (int)hoverSolo.y, (int)crawlSolo.x, (int)crawlSolo.y, hoverBeast != null, crawlBeast != null);
+        }catch(Throwable t){ Log.err("[drv] setupHoverScene failed", t); }
+    }
+
+    static void cellFacts(String name, UnitType t){
+        Object wouldDraw = combineCall("combineunit.units.mega.MegaUnitType", "cellRegionFor", new Class<?>[]{UnitType.class}, t);
+        Log.info("[drv] cell 事实 @: drawCell=@ cellRegion=@ found=@ 巨兽绘制会补的 cell=@", name, t.drawCell,
+            regionName(t.cellRegion), t.cellRegion != null && Core.atlas.isFound(t.cellRegion), regionName((arc.graphics.g2d.TextureRegion)wouldDraw));
+    }
+
+    static void mergeAt(float x, float y, UnitType a, UnitType b, java.util.function.Consumer<Unit> out){
+        try{
+            Seq<Unit> us = new Seq<>();
+            Unit u1 = a.create(Team.sharded); u1.set(x - 14f, y); u1.add(); us.add(u1);
+            Unit u2 = b.create(Team.sharded); u2.set(x + 14f, y); u2.add(); us.add(u2);
+            run(2);
+            Object mega = combineCall("combineunit.units.UnitComboMerge", "mergeSelected", new Class<?>[]{Seq.class}, us);
+            if(mega instanceof Unit mu){ mu.set(x, y); out.accept(mu); }
+        }catch(Throwable t){ Log.err("[drv] mergeAt failed", t); }
+    }
+
+    static void hoverCenter(){
+        float x = 0f, y = 0f; int n = 0;
+        for(Unit u : new Unit[]{hoverSolo, crawlSolo, hoverBeast, crawlBeast}){
+            if(u != null && u.isAdded()){ x += u.x; y += u.y; n++; }
+        }
+        if(n > 0) Core.camera.position.set(x / n, y / n);
+    }
+
+    static void hoverMerge(){
+        // 融合出各自的巨兽（在"单独一只"的右边并排），镜头对着两台巨兽中间
+        float cx = Core.camera.position.x, cy = Core.camera.position.y;
+        mergeAt(cx - 30f, cy, UnitTypes.elude, UnitTypes.elude, u -> hoverBeast = u);
+        mergeAt(cx + 120f, cy, UnitTypes.crawler, UnitTypes.crawler, u -> crawlBeast = u);
+        // 融合完把四个并排摆成一行：单独 elude | elude 巨兽 | 单独 crawler | crawler 巨兽
+        if(hoverSolo != null) hoverSolo.set(cx - 135f, cy);
+        if(hoverBeast != null) hoverBeast.set(cx - 45f, cy);
+        if(crawlSolo != null) crawlSolo.set(cx + 45f, cy);
+        if(crawlBeast != null) crawlBeast.set(cx + 135f, cy);
+        camTarget = hoverBeast != null ? hoverBeast : hoverSolo;
+        Vars.renderer.setScale(2.5f);
+        Log.info("[drv] hover: elude 巨兽=@ crawler 巨兽=@ 单独 elude=@ 单独 crawler=@",
+            hoverBeast == null ? "无" : hoverBeast.type.name, crawlBeast == null ? "无" : crawlBeast.type.name,
+            hoverSolo == null ? "无" : hoverSolo.type.name, crawlSolo == null ? "无" : crawlSolo.type.name);
+    }
 
     static void shot(String name){
         try{

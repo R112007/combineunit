@@ -573,6 +573,8 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         // → Call.unitEnvDeath → 合体当场死。
         int envOn = 0, envOff = ~0, envReq = ~0;
         boolean drownAllowed = true;
+        // 悬浮成员（ElevationMoveUnit，例如 elude）/ 真正贴地走的成员：决定派生类型的 hovering
+        boolean hoverOnly = false, groundWalker = false;
         for(UnitType t : tally.keys()){
             // 【按成员个数加权】这里 tally 是按"类型"遍历的（每种类型只来一次），
             // 所以求和必须乘上该类型的成员数 —— 原来只加一次、计数却按成员数，
@@ -610,11 +612,30 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             // 口径与其它能力一致：成员里**只要有一台不淹**（海军/悬浮/飞行/别的模组的不淹单位），
             // 合体就不淹 —— 能力取并集；纯陆地编组保留原版溺水判定（不能一刀切成全体免淹）。
             if(!t.canDrown) drownAllowed = false;
+            // 悬浮：类型自己标了 hovering，或实体就是 ElevationMoveUnit（模组单位常常没标字段）
+            boolean hov = t.hovering;
+            if(!hov){
+                try{
+                    hov = t.constructor != null && t.constructor.get() instanceof mindustry.gen.ElevationMovec;
+                }catch(Throwable ignored){
+                }
+            }
+            if(hov) hoverOnly = true;
+            if(!t.flying && !UnitComboMerge.isNaval(t) && !hov) groundWalker = true;
         }
         if(envOn != 0) ct.envEnabled = envOn;
         if(envOff != ~0) ct.envDisabled = envOff;
         if(envReq != ~0) ct.envRequired = envReq;
         ct.canDrown = drownAllowed;
+        // 【悬浮（hovering）按成员推导】原版 `UnitEntity.update()` 里地形状态那一段是
+        // `if(isGrounded() && !type.hovering) apply(floor.status, floor.statusDuration)` ——
+        // 悬浮单位（ElevationMoveUnit，例如 elude：`hovering=true`）**靠 type.hovering 免掉液体状态**
+        // （wet / tarred / 各种地形 debuff）。巨兽派生类型从来没设过这个字段，
+        // 于是"成员在液体上不吃 buff、合体后全吃"（用户报的"ElevationMoveUnit 在液体上不受液体 buff"）。
+        // 口径：成员里全是悬浮/飞行/海军这类**不贴地**的，才算 hovering；
+        // 只要有一个真正靠地面走的成员（机甲/履带/腿），它的腿是踩着地面的，就按原版吃地形状态。
+        // （溺水那条另有口径：只要有一台不淹就不淹，见上面 canDrown。）
+        ct.hovering = hoverOnly && !groundWalker;
         ct.speed = spdCount > 0 ? Math.max(spd / spdCount, 0.3f) : 0.8f;
         ct.mineTier = tier;
         ct.mineSpeed = mineSpd;
