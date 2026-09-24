@@ -512,7 +512,9 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         sortIdxByY(left, oy);
         sortIdxByY(pairRight, oy);
 
-        // ---- 中间：一条竖直线（x=0），按原本前后顺序等距排开 ----
+        // ---- 中间：一条竖直线（x=0），**以单位中心为中心**等距排开 ----
+        // 1 把 → 正好在中心（y=0）；2 把 → ±rowGap/2；3 把 → -rowGap / 0 / +rowGap …… 永远关于 y=0 对称，
+        // 整列的"重心"落在单位中心上（用户要求"x=0 的武器的排列以单位中心为中心"）。
         for(int k = 0; k < mid.size; k++){
             Weapon w = ws.get(mid.get(k));
             w.x = 0f;
@@ -867,36 +869,86 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         ct.lowAltitude = true;
         ct.applyLateDefaults();
 
-        // 【占位类型同步】原版命令面板是按 unit.type.id 聚合、再用 content.unit(id) 取类型的
-        // （PlacementFragment：图标用 StatValues.stack(type, n) 读 type.uiIcon，指令按钮遍历
-        // type.commands）。派生巨兽类型全都共用基础巨兽的占位 id，所以面板实际拿到的是
-        // 基础类型本身 —— 它必须跟着这次推导同步，否则：
-        //   · 图标一直是注册时写死的 dagger（用户报的"框选巨兽显示 dagger"）；
-        //   · 指令只剩 [移动, 组合]，成员的自动重建/辅助建造/治疗建筑/挖矿在面板里全不见了。
-        // 纯元数据（名字/指令/姿态/canBoost），服务端也一起同步，只有图标在客户端才有的贴图上做。
-        MegaUnitType placeholder = UnitComboMerge.megaGround;
-        if(placeholder != null){
-            placeholder.localizedName = ct.localizedName;
-            placeholder.commands.clear();
-            placeholder.commands.addAll(ct.commands);
-            placeholder.stances.clear();
-            placeholder.stances.addAll(ct.stances);
-            placeholder.defaultCommand = ct.defaultCommand;
-            placeholder.canBoost = ct.canBoost;
-            placeholder.canHeal = ct.canHeal;
-            // 【注意不要同步 flying/naval 到占位类型】占位类型是所有派生类型共用、且是
-            // 新建巨兽时的"出生类型"：把上一次推导的 flying 留在上面，会让下一次（比如两艘船）
-            // 新建出来的巨兽出生就带着 elevation=1（原版按 type.flying 给出生高度），
-            // 头几十 tick 被当成飞行单位算地形系数。飞行/海军语义由派生类型自己带着。
-            if(icon != null){
-                // 占位类型的 fullIcon 保持"整只单位图"的语义，uiIcon 是面板/小地图用的 UI 图
-                placeholder.fullIcon = body != null ? body : icon;
-                placeholder.uiIcon = icon;
-            }
-        }
+        syncPlaceholder(ct, body, icon);
 
         compTypeCache.put(sig, ct);
         return ct;
+    }
+
+    /**
+     * 把**占位类型**（`UnitComboMerge.megaGround`，也就是命令面板按 `content.unit(unit.type.id)`
+     * 取到的那个类型）同步成"某一份构成"：图标/名字/指令/姿态。
+     *
+     * <p>【为什么要单独拿出来】原版命令面板是按 unit.type.id 聚合、再用 content.unit(id) 取类型的
+     * （PlacementFragment：图标用 StatValues.stack(type, n) 读 type.uiIcon，指令按钮遍历
+     * type.commands）。派生巨兽类型全都共用基础巨兽的占位 id，所以面板实际拿到的是**基础类型本身** ——
+     * 它必须跟着"当前你正在看的那只巨兽"同步，否则：
+     *   · 图标一直是注册时写死的 dagger（用户报的"框选巨兽显示 dagger"）；
+     *   · 指令只剩 [移动, 组合]，成员的自动重建/辅助建造/治疗建筑/挖矿在面板里全不见了；
+     *   · **多只不同构成的巨兽同时存在时，后推导的那只把图标/指令盖到所有巨兽身上**
+     *     （用户报的"3 个 toxopid 合体后，指挥模式图标变成了 corvus"：存档里先有 toxopid 巨兽、
+     *      后面又推导过一只 corvus 巨兽，占位类型的图标就停在 corvus 上）。
+     *
+     * <p>纯元数据（名字/指令/姿态/canBoost），服务端也一起同步；图标只在客户端的贴图上做。
+     * 【不要同步 flying/naval】占位类型是新巨兽的"出生类型"，把上一次推导的 flying 留在上面，
+     * 会让下一次新建的巨兽出生就带着 elevation=1（原版按 type.flying 给出生高度）。
+     */
+    public static void syncPlaceholder(MegaUnitType ct, TextureRegion body, TextureRegion icon){
+        MegaUnitType placeholder = UnitComboMerge.megaGround;
+        if(placeholder == null || ct == null) return;
+        placeholder.localizedName = ct.localizedName;
+        placeholder.commands.clear();
+        placeholder.commands.addAll(ct.commands);
+        placeholder.stances.clear();
+        placeholder.stances.addAll(ct.stances);
+        placeholder.defaultCommand = ct.defaultCommand;
+        placeholder.canBoost = ct.canBoost;
+        placeholder.canHeal = ct.canHeal;
+        if(icon != null){
+            // 占位类型的 fullIcon 保持"整只单位图"的语义，uiIcon 是面板/小地图用的 UI 图
+            placeholder.fullIcon = body != null ? body : icon;
+            placeholder.uiIcon = icon;
+        }
+    }
+
+    /** 把占位类型同步成**这一只**巨兽的构成（图标/名字/指令/姿态）。 */
+    public static void syncPlaceholderTo(Unit beast){
+        if(!(beast instanceof MegaUnitEntity mu) || mu.dominant == null) return;
+        TextureRegion body = null, icon = null;
+        if(!Vars.headless){
+            body = MegaUnitType.bodyRegion(mu.dominant);
+            icon = mu.dominant.uiIcon != null && Core.atlas.isFound(mu.dominant.uiIcon) ? mu.dominant.uiIcon : body;
+        }
+        syncPlaceholder(mu.type instanceof MegaUnitType mt ? mt : UnitComboMerge.megaGround, body, icon);
+    }
+
+    /** 上一次焦点同步的巨兽 id / 构成签名（没变就不重复同步）。 */
+    private static int lastFocusId = Integer.MIN_VALUE, lastFocusSig = Integer.MIN_VALUE;
+
+    /**
+     * 客户端每帧调用：把占位类型同步成**当前焦点的那只巨兽**（指挥模式选中的优先，其次玩家操控的），
+     * 这样命令面板/单位列表上的图标与指令至少对"你正在看的那只"是正确的（地图绘制按实例 dominant，
+     * 不受影响）。同一只巨兽构成没变就跳过，别每帧白刷一遍。
+     */
+    public static void syncPlaceholderToFocus(){
+        if(Vars.headless || Vars.control == null || Vars.control.input == null) return;
+        Unit focus = null;
+        var selected = Vars.control.input.selectedUnits;
+        if(selected != null){
+            for(Unit u : selected){
+                if(u instanceof MegaUnitEntity){
+                    focus = u;
+                    break;
+                }
+            }
+        }
+        if(focus == null && Vars.player != null && Vars.player.unit() instanceof MegaUnitEntity pu) focus = pu;
+        if(!(focus instanceof MegaUnitEntity mu) || mu.dominant == null) return;
+        int sig = mu.compositionSig();
+        if(mu.id == lastFocusId && sig == lastFocusSig) return;
+        lastFocusId = mu.id;
+        lastFocusSig = sig;
+        syncPlaceholderTo(mu);
     }
 
     /**

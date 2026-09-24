@@ -18,13 +18,13 @@ verify/make-dataset.sh /tmp/mp_unit/data      # 产物 build/libs/combineunit.ja
 combine 的那一份，本仓库的改动根本没被验到。`run-headless.sh` / `run-client.sh` 只要看到
 `data/mods/combine.jar` 就直接拒绝（exit 4）。
 
-## 1. headless 逻辑测试（16 项）
+## 1. headless 逻辑测试（18 项）
 
 ```bash
 for t in SanityCheck MegaEnvTest MegaFieldTest MegaWaterTest MegaHoverTest MegaBigTest \
-         MegaLegsTest MegaWeaponLayoutTest MegaMiningTest MegaPayloadTest MegaStatSumTest \
-         MegaSurviveTest MegaSyncTest MegaGhostMemberTest MegaClipSizeTest MegaGhostTest \
-         ComboFireSupportTest; do
+         MegaLegsTest MegaWeaponLayoutTest MegaPlaceholderTest MegaMiningTest MegaPayloadTest \
+         MegaStatSumTest MegaSurviveTest MegaSyncTest MegaGhostMemberTest MegaClipSizeTest \
+         MegaGhostTest ComboFireSupportTest; do
   verify/run-headless.sh mx /tmp/mp_unit/data combineunit.dbg.$t
 done
 ```
@@ -38,7 +38,8 @@ done
 | `MegaHoverTest` | 悬浮成员（ElevationMoveUnit / elude）与 cell 贴图四件事：①**cell**：原版 `UnitType.draw()` 的顺序是 `drawBody → if(drawCell) drawCell(unit) → drawWeapons`，巨兽派生类型把 `drawCell` 关了（绘制全在自定义 draw 里），自定义绘制里又没接这一段 → 成员有 cell、合体后没了（用户报的"组合巨兽没画 cell"；`cellRegionFor(dom)` 抽成了绘制与验证共用的判断）；②**液体状态**：原版 `UnitEntity.update()` 是 `if(isGrounded() && !type.hovering) apply(floor.status, …)` —— 悬浮单位靠 `type.hovering` 免掉液体 buff（wet/tarred…），巨兽派生类型从没设过这个字段 → 成员不吃、合体后全吃（用户报的"ElevationMoveUnit 在液体上不受液体 buff"）。现在按成员推导：全是悬浮/飞行/海军这类不贴地的编组才给 `hovering=true`，有真正贴地走的成员就按原版吃地形状态；③**武器位置**：中间那列（x≈0）是**一条直线**、两侧的武器**围成一个圆**（完整断言在 `MegaWeaponLayoutTest`；本测试只做「布局自洽」检查：每把武器落在中间直线 x=0 或两侧圆弧 |位置|=colX、镜像搭档左右严格对称、无重叠）④**cell 的低血量闪烁**：`cellColor(unit)` 里的 `absin(Time.time, f*5, 1)*(1-f)` 脉冲（低血量 cell 会闪），单独 crawler 与 crawler 巨兽的脉冲幅度都是 0.542；真客户端把巨兽冻住压到 30% 血连拍两帧（`049/050_hover_flash_*.png`），同一位置 cell 像素最大差 0.243 = 看得见在闪；⑤elude 导弹的子弹类型/瞄准点/转向量本体与巨兽一致 |
 | `MegaBigTest` | 用户报的"合体成员 &gt; 18 时非房主客户端完全看不见这只大单位"：服务端每个实体的快照是 `id(4)+classId(1)+writeSync`、按 800 字节分批，而快照走 UDP、arc 客户端写缓冲只有 16384 字节 —— 成员数据全量内联时 18 只就 3.1KB、24 只 4.1KB，连同别的实体一超整包就被丢。现在**快照只发紧凑构成**（版本 3：每成员 `id(4)+typeId(2)`，完整成员数据仍走存档），实测 24 只从 4107 字节降到 675 字节、客户端读回成员数 24/24；顺带验 20 只的巨兽跑 40000 tick（≈11 分钟游戏时间）仍在世界里（`rules.disableUnitCap` 才能一次造 20 只：默认 unitCap 会把第 9 只起 unitCapDeath）|
 | `MegaLegsTest` | 用户报的"腿类单位的**腿部绘制和翻墙能力**被删了"：**腿**原先确实没画出来 —— 代表类型有真·整图时走了"整图已含部件"的分支，而整图里那几条腿是"图标姿态"（蜷在身体底下），看着就是没腿（真客户端对比图：修前 `042_legs_mega.png` 巨兽是个没腿的疙瘩、旁边原版 spiroct 六条长腿；修后 `074_legs_mega.png` 巨兽也伸出长腿）。现在**腿类和机甲一样一律自己补画**（`MegaUnitType.drawOwnParts`），并有断言钉住 `drawOwnParts=true` + 腿数=代表类型腿数；**翻墙（`allowLegStep`）确实从来没接上** —— 现在按成员推导 `type.allowLegStep`，`solidity()` 在腿模式且 allowLegStep 时用 `EntityCollisions::legsSolid`，`pathCost` 也按原版 initPathType 的顺序给了 costLegs。判定：腿类巨兽和原版 spiroct 在"墙格/空地/天然石墙格"三种格子的碰撞谓词逐格一致；**行为**上给它下移动指令能越过一排玩家放的墙（x 1200 → 1248，墙在 1240）；对照组机甲巨兽的谓词和原版 dagger 一致（照旧撞墙）|
-| `MegaWeaponLayoutTest` | 任意 | 用户要求的武器位置与射程精修：①**x=0 的武器放中间（一条直线 x=0）**；②**mirror=true 的镜像对左右严格对称**（x 取反、y 相同）；③**mirror=false 且 x>0 放圆圈的右半边、x<0 放左半边**（两侧武器围成一个半径 rad 的圆）；④`range/maxRange` 按**实测挂载**重算（原版 initWeapons 就是按武器算这两个字段，巨兽类型 late 注册、init 从不执行，以前写死 260f）。测试把「镜像对成员（dagger）+ x=0 成员（vela）+ 现场给 dagger 追加的一把只有右边（x=5）、一把只有左边（x=-5）的武器」拼成一只巨兽，逐把核对落位（挂载顺序 = 成员顺序 × 成员武器顺序）：实测（rad=13）`[0] (3,13) ↔ [1] (-3,13)`、`[5] (3,-13) ↔ [6] (-3,-13)`（镜像对、严格对称、都在圆上）、`[4] (0,0)`（中间直线）、单侧武器 `(13,0)/(−13,0)`（圆的左右半边）；射程 `type.range = type.maxRange = range() = 180`（该编组最大「弹体射程 + 枪口偏移」，不再是写死的 260，且 ≥ 最大弹体射程） |
+| `MegaWeaponLayoutTest` | 任意 | 用户要求的武器位置与射程精修：①**x=0 的武器放中间（一条直线 x=0）**；②**mirror=true 的镜像对左右严格对称**（x 取反、y 相同）；③**mirror=false 且 x>0 放圆圈的右半边、x<0 放左半边**（两侧武器围成一个半径 rad 的圆）；⑤**中间那列以单位中心为中心**（1 把→y=0；2 把→±rowGap/2；3 把→-rowGap/0/+rowGap…，y 之和恒为 0，实测 3×vela 的巨兽中间列 y = -20.8 / 0 / +20.8）；④`range/maxRange` 按**实测挂载**重算（原版 initWeapons 就是按武器算这两个字段，巨兽类型 late 注册、init 从不执行，以前写死 260f）。测试把「镜像对成员（dagger）+ x=0 成员（vela）+ 现场给 dagger 追加的一把只有右边（x=5）、一把只有左边（x=-5）的武器」拼成一只巨兽，逐把核对落位（挂载顺序 = 成员顺序 × 成员武器顺序）：实测（rad=13）`[0] (3,13) ↔ [1] (-3,13)`、`[5] (3,-13) ↔ [6] (-3,-13)`（镜像对、严格对称、都在圆上）、`[4] (0,0)`（中间直线）、单侧武器 `(13,0)/(−13,0)`（圆的左右半边）；射程 `type.range = type.maxRange = range() = 180`（该编组最大「弹体射程 + 枪口偏移」，不再是写死的 260，且 ≥ 最大弹体射程） |
+| `MegaPlaceholderTest` | 任意（数据目录里放用户存档更好，例如 `saves/17.msav`） | 用户报的"**3 个 toxopid 合体后指挥模式图标变成 corvus**"：命令面板是按 `content.unit(unit.type.id)` 取**类型**的图标/指令，而巨兽派生类型共用一个占位 id（`megaGround.id`）—— 占位类型的图标是"每推导一只巨兽就覆盖一次"，存档里先有 toxopid 巨兽、后面又推导过一只 corvus 巨兽，图标就停在 corvus 上。修法：抽出 `MegaUnitEntity.syncPlaceholder()`，客户端每帧（`UnitComboBind.tick()` → `syncPlaceholderToFocus()`）把占位类型同步成"当前焦点的那只巨兽"（指挥模式选中的优先、其次玩家操控的）。本测试：先合 toxopid×3 再合 corvus×3 → 断言两者共用占位 id；调用 `syncPlaceholderTo(某一只)` 后占位类型的指令=那一只的；并读用户存档打印现场（实测存档里有 4 只巨兽：risso / toxopid×2 / corvus）。图标本身要在真客户端看（`icon` 模式）|
 | `MegaMiningTest` | 矿工巨兽：物品容量=成员之和（90=3×30）、`drawMineBeam`、光束起点不是 -Inf、真的挖得到东西、成员表丢了也不退回占位类型 |
 | `MegaPayloadTest` | 巨兽能被原版载具装进载荷黑洞销毁；成员丢了的巨兽不能退化成占位类型（图标不变） |
 | `MegaStatSumTest` | 建造/挖矿速率按成员**量行为**累加（1/2/3 台 = 1×/2×/3×）；客户端按 `EntityMapping + readSync` 造出来的副本也一样；力场实例/展开状态不被快照重建 |
@@ -75,6 +76,7 @@ verify/run-client.sh mx /tmp/mp_unit/data shipmega   # 两艘 risso 在深水里
 | legs/mech | `*_legs_mega.png` / `*_mech_mega.png` | 腿/机甲腿按体型放大（参照单位同图对比：腿展 46~48 vs 参照 15） |
 | duo | `*_duo_fight*.png` | 碰撞箱、治疗光束、武器开火 |
 | hover | `*_hover_before.png` / `*_hover_cell.png` / `*_hover_flash_a/b.png` | 单独 elude / crawler 与各自巨兽并排：看 **cell** 贴图（`elude-cell`/`crawler-cell`/`spiroct-cell`/`power-cell` 都真实存在；修前巨兽没有这块，修后有）；最后两张是把巨兽冻住压到 30% 血连拍，看 cell 的**低血量闪烁**（同位置像素最大差 0.243）|
+| icon | `*_icon_panel.png` | 指挥模式图标：读用户存档（没有就现场合 toxopid×3 + corvus×3），打印"面板按 type.id 取到的图标" vs "该巨兽代表成员的图标"，并选中一只巨兽让它走焦点同步。实测用户存档：修前 4 只巨兽面板图标全是 `unit-corvus-ui`；选中 toxopid 巨兽后变成 `unit-toxopid-ui`、`是否一致=true` |
 | shipmega | `*_ship_mega.png` | 巨兽浮在深水上、地形速度系数和原版船一致（1.3） |
 
 驱动 mod（`verify/client/Driver.java`）的模式场景是从 combine 仓库搬过来的（拆仓后单位侧只在本仓库）；

@@ -137,8 +137,22 @@ public class Driver extends Mod{
                 Timer.schedule(() -> shot("hover_flash_a"), 32f);
                 Timer.schedule(() -> shot("hover_flash_b"), 33.2f);
                 Timer.schedule(() -> { Log.info("[drv] hover 模式结束 frames=@", frames); Core.app.exit(); }, 36f);
+            }else if(mode.equals("icon")){
+                // 用户报："3 个 toxopid 合体后，指挥模式下的图标变成了 corvus"。
+                // 面板是按 content.unit(unit.type.id) 取**类型**的图标/指令的，而巨兽派生类型共用一个
+                // 占位 id —— 存档里同时有 toxopid 巨兽和 corvus 巨兽时，占位类型会停在最后推导的那只上。
+                // 本模式：读用户存档（没有就现场合 toxopid×3 + corvus×3），选中 toxopid 巨兽，
+                // 打印"面板会用的图标" vs "该巨兽代表成员的图标"，并截图。
+                installFrameCounter();
+                Timer.schedule(Driver::hideDialogs, 3f);
+                Timer.schedule(Driver::setupIconScene, 5f);
+                Timer.schedule(Driver::iconReport, 16f);
+                Timer.schedule(Driver::iconSelect, 20f);
+                Timer.schedule(Driver::iconReport, 24f);
+                Timer.schedule(() -> shot("icon_panel"), 26f);
+                Timer.schedule(() -> { Log.info("[drv] icon 模式结束 frames=@", frames); Core.app.exit(); }, 30f);
             }else{
-                Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega）", mode);
+                Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega|hover|icon）", mode);
                 Core.app.exit();
             }
         });
@@ -982,6 +996,116 @@ public class Driver extends Mod{
         Log.info("[drv] hover: elude 巨兽=@ crawler 巨兽=@ 单独 elude=@ 单独 crawler=@",
             hoverBeast == null ? "无" : hoverBeast.type.name, crawlBeast == null ? "无" : crawlBeast.type.name,
             hoverSolo == null ? "无" : hoverSolo.type.name, crawlSolo == null ? "无" : crawlSolo.type.name);
+    }
+
+    // ---------------- icon（指挥模式图标：巨兽代表类型 vs 面板按 type.id 取到的类型） ----------------
+    static Unit iconBeast;
+
+
+    /** 现场合 count 只同型单位（Driver 里没有这个 helper，icon 模式用）。 */
+    static Unit mergeMany(float x, float y, UnitType type, int count){
+        try{
+            Seq<Unit> us = new Seq<>();
+            for(int i = 0; i < count; i++){
+                Unit u = type.create(Team.sharded);
+                u.set(x + i * 12f, y);
+                u.add();
+                us.add(u);
+            }
+            run(2);
+            Object mega = combineCall("combineunit.units.UnitComboMerge", "mergeSelected", new Class<?>[]{Seq.class}, us);
+            if(mega instanceof Unit mu){ mu.set(x, y); return mu; }
+        }catch(Throwable t){ Log.err("[drv] mergeMany failed", t); }
+        return null;
+    }
+
+    /** 读用户存档（有的话），否则现场合 toxopid×3 + corvus×3 —— 复现"占位类型图标被覆盖"。 */
+    static void setupIconScene(){
+        try{
+            hideDialogs();
+            arc.files.Fi save = null;
+            try{
+                // 用游戏自己的数据目录 API（run-client.sh 传的是 -Dmindustry.data.dir）
+                arc.files.Fi dir = Core.settings.getDataDirectory().child("saves");
+                Log.info("[drv] icon: 找存档目录 @ exists=@", dir.absolutePath(), dir.exists());
+                if(dir.exists()) for(arc.files.Fi f : dir.list()){
+                    Log.info("[drv] icon:   存档候选 @", f.name());
+                    if(f.name().endsWith(".msav") && !f.name().contains("backup")){ save = f; break; }
+                }
+            }catch(Throwable t){ Log.err("[drv] icon: 找不到存档目录", t); }
+            if(save != null){
+                Log.info("[drv] icon: 读用户存档 @", save.name());
+                mindustry.io.SaveIO.load(save);
+            }else{
+                var map = Vars.maps.all().find(m -> m.name().contains("Archipelago"));
+                Vars.world.loadMap(map, map.applyRules(Gamemode.survival));
+            }
+            Vars.state.rules.canGameOver = false;
+            Vars.state.rules.waves = false;
+            Vars.logic.play();
+            run(30);
+            pickIconBeast();
+            if(iconBeast == null){
+                Log.info("[drv] icon: 存档里没有巨兽，现场合一只 toxopid（对照一只 corvus）");
+                float cx = Core.camera.position.x, cy = Core.camera.position.y;
+                // 先 toxopid 后 corvus：后者的推导会覆盖共用的占位类型（复现用户的现场）
+                Unit a = mergeMany(cx, cy, UnitTypes.toxopid, 3);
+                Unit b = mergeMany(cx + 120f, cy, UnitTypes.corvus, 3);
+                iconBeast = a != null ? a : b;
+            }
+            Log.info("[drv] icon: 选中目标 = @（代表类型 @）", iconBeast == null ? "无" : iconBeast.id(),
+                iconBeast == null ? "-" : dominantName(iconBeast));
+        }catch(Throwable t){ Log.err("[drv] setupIconScene failed", t); }
+    }
+
+    /** 挑一只 toxopid 巨兽（用户报的正是"3 个 toxopid 合体后显示成 corvus"）；没有就挑第一只非 corvus 的。 */
+    static void pickIconBeast(){
+        Unit any = null, nonCorvus = null;
+        for(Unit u : Groups.unit){
+            if(!u.getClass().getName().equals("combineunit.units.mega.MegaUnitEntity")) continue;
+            if(any == null) any = u;
+            String dom = dominantName(u);
+            if(dom.equals("toxopid")){ iconBeast = u; return; }
+            if(nonCorvus == null && !dom.equals("corvus")) nonCorvus = u;
+        }
+        iconBeast = nonCorvus != null ? nonCorvus : any;
+    }
+
+    static String dominantName(Unit u){
+        Object o = field(u.getClass(), u, "dominant");
+        return o instanceof UnitType t ? t.name : "null";
+    }
+
+    static void iconSelect(){
+        if(iconBeast == null) return;
+        Vars.control.input.selectedUnits.clear();
+        Vars.control.input.selectedUnits.add(iconBeast);
+        // 真的切进指挥模式：截图里才会出现那块"指挥模式"面板（用户报的那张图就是它）
+        try{ Vars.control.input.commandMode = true; }catch(Throwable ignored){}
+        Core.camera.position.set(iconBeast.x, iconBeast.y);
+        camTarget = iconBeast;
+        Log.info("[drv] icon: 已选中巨兽 @（指挥模式选择集大小=@）", iconBeast.id(),
+            Vars.control.input.selectedUnits.size);
+    }
+
+    /** 打印"面板会用的图标/指令" vs "巨兽代表成员的图标/指令"。 */
+    static void iconReport(){
+        try{
+            int beasts = 0;
+            for(Unit u : Groups.unit){
+                if(!u.getClass().getName().equals("combineunit.units.mega.MegaUnitEntity")) continue;
+                beasts++;
+                UnitType resolved = Vars.content.unit(u.type.id);
+                Object domO = field(u.getClass(), u, "dominant");
+                UnitType dom = domO instanceof UnitType t ? t : null;
+                Log.info("[drv] icon 巨兽@ id=@ 代表类型=@", beasts, u.id(), dom == null ? "-" : dom.name);
+                Log.info("[drv]   面板按 type.id 取到的类型=@（名字=@）  面板图标=@", resolved == null ? "null" : resolved.name,
+                    resolved == null ? "-" : resolved.localizedName, regionName(resolved == null ? null : resolved.uiIcon));
+                Log.info("[drv]   代表成员自己的图标=@  是否一致=@", regionName(dom == null ? null : dom.uiIcon),
+                    resolved != null && dom != null && resolved.uiIcon == dom.uiIcon);
+            }
+            Log.info("[drv] icon 场上有 @ 只巨兽", beasts);
+        }catch(Throwable t){ Log.err("[drv] iconReport failed", t); }
     }
 
     static void shot(String name){

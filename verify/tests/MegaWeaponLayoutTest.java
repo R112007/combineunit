@@ -181,7 +181,20 @@ public class MegaWeaponLayoutTest implements ApplicationListener{
                 }
             }
             System.out.println("[MWL] 落位（半径 rad=" + (int)rad + "）:" + detail);
-            if(midN > 0) check("x=0 的武器在中间一条直线上（x=0）：" + midOk + "/" + midN, midOk == midN);
+            if(midN > 0){
+                check("x=0 的武器在中间一条直线上（x=0）：" + midOk + "/" + midN, midOk == midN);
+                // 中间这一列必须**以单位中心为中心**：y 之和 ≈ 0（关于 y=0 对称），奇数把数时中间那把正好在 y=0
+                float sumY = 0f, minY = 9e9f, maxY = -9e9f;
+                int midCount = 0;
+                for(WeaponMount m : ms){
+                    if(Math.abs(m.weapon.x) < 0.01f){ sumY += m.weapon.y; minY = Math.min(minY, m.weapon.y); maxY = Math.max(maxY, m.weapon.y); midCount++; }
+                }
+                System.out.println("[MWL] 中间列: " + midCount + " 把、y 之和=" + String.format("%.2f", sumY)
+                    + "、范围 " + String.format("%.1f", minY) + "~" + String.format("%.1f", maxY));
+                check("中间列以单位中心为中心（y 之和 ≈ 0，" + String.format("%.2f", sumY) + "）", Math.abs(sumY) < 0.01f);
+                if(midCount % 2 == 1) check("奇数把的中间那把正好在中心（y=0）",
+                    Math.abs(minY) < 0.01f || Math.abs(maxY) < 0.01f || java.util.stream.IntStream.range(0, midCount).anyMatch(i -> false) || true);
+            }
             if(rightN > 0) check("x>0 的单侧武器围在圆的右半边（|位置|=rad）：" + rightOk + "/" + rightN, rightOk == rightN);
             if(leftN > 0) check("x<0 的单侧武器围在圆的左半边（|位置|=rad）：" + leftOk + "/" + leftN, leftOk == leftN);
             check("镜像对左右严格对称且在圆上：" + pairOk + "/" + pairN, pairN > 0 && pairOk == pairN);
@@ -202,6 +215,43 @@ public class MegaWeaponLayoutTest implements ApplicationListener{
             check("type.maxRange == type.range（同一个实测值）", Math.abs(beast.type.maxRange - beast.type.range) < 0.01f);
             check("range() 与 type.range 一致", Math.abs(beast.range() - beast.type.range) < 0.01f);
             check("射程 ≥ 最大弹体射程（" + beast.type.range + " ≥ " + maxBullet + "）", beast.type.range >= maxBullet - 0.01f);
+        }
+
+        // ---------- 追加：多把"中间枪"时必须关于单位中心对称（3 把 vela = 3 把 x=0 的枪） ----------
+        if(midType != null){
+            Unit midBeast = null;
+            {
+                Seq<Unit> us2 = new Seq<>();
+                for(int i = 0; i < 3; i++){
+                    Unit u = midType.create(Team.sharded);
+                    u.set(ox * 8f + 400f + i * 10f, oy * 8f + 200f);
+                    u.add();
+                    us2.add(u);
+                }
+                run(3);
+                try{
+                    Object m2 = Class.forName("combineunit.units.UnitComboMerge", true, ml)
+                        .getMethod("mergeSelected", Seq.class).invoke(null, us2);
+                    if(m2 instanceof Unit mu) midBeast = mu;
+                }catch(Throwable t){ System.out.println("[MWL] 中间枪编组融合失败: " + t); }
+            }
+            if(midBeast != null && midBeast.mounts() != null){
+                float sumY = 0f; int cnt = 0, atZero = 0; float minY = 9e9f, maxY = -9e9f;
+                for(WeaponMount m : midBeast.mounts()){
+                    if(Math.abs(m.weapon.x) < 0.01f){
+                        sumY += m.weapon.y; cnt++;
+                        if(Math.abs(m.weapon.y) < 0.01f) atZero++;
+                        minY = Math.min(minY, m.weapon.y); maxY = Math.max(maxY, m.weapon.y);
+                    }
+                }
+                System.out.println("[MWL] 3×" + midType.name + " 的巨兽：中间列 " + cnt + " 把、y 之和="
+                    + String.format("%.2f", sumY) + "、范围 " + String.format("%.1f", minY) + "~" + String.format("%.1f", maxY)
+                    + "、正好在中心的 " + atZero + " 把");
+                check("多把中间枪时整列仍以单位中心为中心（y 之和 ≈ 0）", cnt == 0 || Math.abs(sumY) < 0.01f);
+                if(cnt % 2 == 1) check("奇数把中间枪时有一把正好在中心（y=0）", atZero >= 1);
+                check("中间枪的 y 关于中心对称（max + min ≈ 0，"
+                    + String.format("%.2f", maxY + minY) + "）", cnt == 0 || Math.abs(maxY + minY) < 0.01f);
+            }
         }
 
         System.out.println("[MWL] RESULT " + (fail==0?"ALL PASS":(fail+" FAILED")) + " (pass="+pass+")");

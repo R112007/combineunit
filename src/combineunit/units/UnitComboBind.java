@@ -1,6 +1,7 @@
 package combineunit.units;
 
 import arc.Core;
+import combineunit.units.mega.MegaUnitEntity;
 import arc.Events;
 import arc.graphics.g2d.Draw;
 import arc.graphics.g2d.Lines;
@@ -51,6 +52,11 @@ public class UnitComboBind{
 
     /** 每帧处理。 */
     private static void tick(){
+        // 【命令面板图标/指令】面板是按 content.unit(unit.type.id) 读**类型**的，而巨兽派生类型
+        // 共用一个占位 id —— 多只不同构成的巨兽同时存在时，占位类型会停在"最后推导的那只"上
+        //（用户报的"3 个 toxopid 合体后指挥模式图标变成 corvus"）。每帧把占位类型同步成
+        // 当前焦点的那只巨兽，面板至少对"你正在看的那只"是正确的。
+        MegaUnitEntity.syncPlaceholderToFocus();
         if(!Vars.state.isGame()){
             picked = null;
             prevCmd.clear();
