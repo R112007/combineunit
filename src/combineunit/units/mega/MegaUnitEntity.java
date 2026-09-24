@@ -21,6 +21,7 @@ import mindustry.entities.abilities.Ability;
 import mindustry.entities.units.WeaponMount;
 import mindustry.gen.Crawlc;
 import mindustry.gen.Groups;
+import mindustry.gen.Player;
 import mindustry.gen.Legsc;
 import mindustry.gen.Tankc;
 import mindustry.gen.Unit;
@@ -106,6 +107,11 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
     private transient boolean walkedState;
     /** 履带扬尘的节流计时（原版 TankComp 的 treadEffectTime）。 */
     private transient float treadEffectTime;
+    /** 存档里记的"当时附身在这只巨兽上的玩家"（见 writeMembers 版本 4、restoreOwner）。 */
+    private transient int savedOwnerId = -1;
+    private transient String savedOwnerName;
+    /** 读档后重试"把玩家重新附身上来"的节流/超时（原版客户端是在 WorldLoadEvent 里 player.add() 的）。 */
+    private transient float ownerRetry, ownerWaited;
     /**
      * 成员移动能力（构成推导）：有飞行成员就能飞、有海军成员就能游、有陆地成员就能跑。
      * 移动模式按当前地形动态选择（{@link #moveMode()}），不再用"多数决"定死一个形态——
@@ -1065,6 +1071,58 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
     public void afterRead(){
         super.afterRead();
         refreshDerived();
+        restoreOwner();
+    }
+
+    /**
+     * 【读档后恢复附身】原版存档把"玩家控制器"只记成 player id（{@code TypeIO.writeController}），
+     * 而 {@code SaveIO.load} 一开始就 {@code Logic.reset() → Groups.clear()} 把玩家清掉了 ——
+     * {@code TypeIO.readController} 里 `Groups.player.getByID(id)` 找不到人就 `return prev`（null，
+     * 因为新建实体的 controller 本来就是空的），巨兽随后被我们的兜底塞上 AI 控制器：
+     * AI 每帧在 {@code AIController.updateWeapons()} 里复位 `mount.shoot/mount.rotate`，
+     * 玩家的开火输入被覆盖 —— 就是用户报的"附身巨兽后退出地图再进去不能攻击，得重新附身才行"。
+     *
+     * <p>我们在自己的存档块（版本 4）里额外记了附身者的 **id + 名字**，这里把玩家重新挂回来
+     * （{@code owner.unit(this)} = 设 {@code player.unit} 并把 controller 设成玩家）。
+     * 客户端是在 WorldLoadEvent 里才 {@code player.add()} 的，所以刚读档那几帧玩家可能还不在，
+     * 由 {@link #tickRestoreOwner()} 每 20 tick 重试，最多等 5 分钟（等不到就保持原版行为：
+     * 这只巨兽继续由 AI 控制，玩家得自己重新附身）。
+     */
+    private void restoreOwner(){
+        if(savedOwnerId < 0 && (savedOwnerName == null || savedOwnerName.isEmpty())) return;
+        if(dead){
+            savedOwnerId = -1; savedOwnerName = null;
+            return;
+        }
+
+        Player owner = savedOwnerId >= 0 ? Groups.player.getByID(savedOwnerId) : null;
+        if(owner == null && savedOwnerName != null && !savedOwnerName.isEmpty()){
+            for(Player p : Groups.player){
+                if(savedOwnerName.equals(p.name)){ owner = p; break; }
+            }
+        }
+        if(owner == null) return;                     // 玩家还没回来，等下一次重试
+
+        savedOwnerId = -1; savedOwnerName = null;     // 找到就只处理这一次
+        if(owner.unit() == null && !dead){
+            owner.unit(this);
+            Log.info("[combine] 读档后把玩家 @ 重新附身到组合巨兽上", owner.name);
+        }
+    }
+
+    /** 每帧（节流）尝试恢复附身，见 {@link #restoreOwner()}。 */
+    private void tickRestoreOwner(){
+        if(savedOwnerId < 0 && (savedOwnerName == null || savedOwnerName.isEmpty())) return;
+        ownerWaited += arc.util.Time.delta;
+        if(ownerWaited > 60f * 300f){
+            savedOwnerId = -1; savedOwnerName = null;
+            return;
+        }
+        ownerRetry -= arc.util.Time.delta;
+        if(ownerRetry <= 0f){
+            ownerRetry = 20f;
+            restoreOwner();
+        }
     }
 
 
@@ -1213,8 +1271,17 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             //       成员实体当场摘掉）；
             //   0 = 旧格式（body 直接以 i(数量) 开头）—— 旧存档/旧快照里 i(n) 的最高字节恒为 0，
             //       正好被读成 version=0，天然兼容。
-            w.b(2);
+            //   4 = 存档格式再带一个"附身者"（id + 名字）：原版存档只把"玩家控制器"记成玩家 id，
+            //       而读档时 Logic.reset() 已经 Groups.clear() 把玩家清掉了 —— TypeIO.readController
+            //       找不到人就 return prev（= null），巨兽随后被兜底塞上 AI 控制器：玩家"退出地图再
+            //       进去就不能攻击，得重新附身才行"（用户报的）。这里额外记下附身者，读档后等玩家
+            //       回来再挂上（见 restoreOwner）。
+            //   3 = 紧凑构成（网络快照专用，见 writeMembersSync）—— 存档块不用这个版本号。
+            Player owner = controller() instanceof Player p ? p : null;
+            w.b(4);
             w.i(dominant == null ? -1 : dominant.id);
+            w.i(owner == null ? -1 : owner.id);
+            w.str(owner == null ? "" : owner.name);
             w.i(members.size);
             for(int i = 0; i < members.size; i++){
                 UnitPayload up = members.get(i);
@@ -1359,6 +1426,11 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
                     UnitType t = Vars.content.unit(domId);
                     if(t != null) domHint = t;
                 }
+            }
+            if(version >= 4){
+                // 存档里的"附身者"：读档后等玩家回来重新挂上（见 restoreOwner）
+                savedOwnerId = r.i();
+                savedOwnerName = r.str(64);
             }
             n = r.i();
         }else{
@@ -1957,6 +2029,8 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         // 身体部件（腿/机甲腿/履带/爬虫身）的动画：原版是实体组件在 super.update() 里跑的，
         // 巨兽没有这些组件，在这里按代表类型的部件种类自己驱动（绘制见 MegaUnitType）。
         updateAttachments();
+        // 读档后把"原本附身在这只巨兽上的玩家"重新挂回来（见 restoreOwner）
+        tickRestoreOwner();
         // 【碾压】原版坦克的碾压在 TankComp.update() 里跑，而巨兽继承的是普通 UnitEntity
         //（生成类 UnitEntity 的接口表里没有 Tankc/TankComp），super.update() 不含这段 ——
         // 有坦克成员时必须自己跑一遍，否则"合体后履带还能画、但压不动东西"。

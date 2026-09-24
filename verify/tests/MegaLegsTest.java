@@ -173,13 +173,29 @@ public class MegaLegsTest implements ApplicationListener{
             run(5);
             float startX = legsBeast.x;
             orderMove(legsBeast, wallX + 60f, legsBeast.y);
-            for(int i = 0; i < 420; i++){
+            int megaTicks = -1;
+            for(int i = 0; i < 1500; i++){
                 run(1);
-                if(legsBeast.x > wallX + 8f) break;
+                if(legsBeast.x > wallX){ megaTicks = i; break; }
             }
             System.out.println("[ML] 腿类巨兽: 起点 x=" + (int)startX + " → 现在 x=" + (int)legsBeast.x
-                + "（墙 x=" + (int)wallX + "）");
-            check("腿类巨兽能越过玩家放的墙（x 越过墙线）", legsBeast.x > wallX + 8f);
+                + "（墙 x=" + (int)wallX + "，用了 " + megaTicks + " tick 越过墙线）");
+            // 【参照：原版 spiroct 在同样条件下能走到哪】巨兽的翻墙能力必须和原版单位同档 ——
+            // 只断言"越过墙线"不够严谨（以前巨兽带着成员的 canBoost 会**直接飞过去**，看着更"能翻墙"，
+            // 其实那是助推的副作用，见 MegaBoostTest）。这里两个都走一遍对比。
+            spiroctRef.set(wallX - 40f, (oy + 0.5f) * 8f);
+            run(5);
+            orderMove(spiroctRef, wallX + 60f, spiroctRef.y);
+            int refTicks = -1;
+            for(int i = 0; i < 1500; i++){
+                run(1);
+                if(spiroctRef.x > wallX){ refTicks = i; break; }
+            }
+            System.out.println("[ML] 参照原版 spiroct: 起点 x=" + (int)(wallX - 40f) + " → 现在 x="
+                + (int)spiroctRef.x + "（墙 x=" + (int)wallX + "，用了 " + refTicks + " tick）");
+            check("腿类巨兽能踩上/越过玩家放的墙（x=" + (int)legsBeast.x + " > 墙线 " + (int)wallX + "）",
+                megaTicks >= 0);
+            check("原版 spiroct 在同样条件下也能越过（对照，" + refTicks + " tick）", refTicks >= 0);
         }
         if(mechBeast != null){
             // 【对照】机甲巨兽的碰撞谓词必须和原版机甲（dagger）一致：墙格对它是实心的
