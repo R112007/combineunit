@@ -74,6 +74,21 @@ public class MegaFieldTest implements ApplicationListener{
         return sum;
     }
 
+    /** 成员类型上力场半径的最大值（合并前的基准）。 */
+    static float memberFieldRadius(UnitType t){
+        float max = 0f;
+        for(var a : t.abilities)
+            if(a instanceof mindustry.entities.abilities.ForceFieldAbility ff) max = Math.max(max, ff.radius);
+        return max;
+    }
+
+    /** 巨兽身上合并出来的那份力场的半径。 */
+    static float fieldRadius(Unit u){
+        for(var a : u.abilities())
+            if(a instanceof mindustry.entities.abilities.ForceFieldAbility ff) return ff.radius;
+        return 0f;
+    }
+
     /** 反射调 combine 的 groupable（测试类编译时只有游戏 jar，不能直接引用模组类）。 */
     static boolean combineGroupable(Unit u){
         try{
@@ -163,6 +178,49 @@ public class MegaFieldTest implements ApplicationListener{
         check("力场上限 = 成员上限之和（" + fieldMax(mega) + " = " + expectMax + "）", Math.abs(fieldMax(mega) - expectMax) < 0.01f);
         check("力墙 bar 不超上限（盾 " + mega.shield() + " ≤ " + fieldMax(mega) + "，盾是融合前成员之和 " + shieldBefore + "）",
             mega.shield() <= fieldMax(mega) + 0.01f);
+
+        // ---------- 力场半径要"适配合体后的巨兽"（用户要求） ----------
+        // 合并语义：max（盾容）按成员求和；radius 取成员最大值后再乘体型缩放系数 bodyScale()
+        //（= 综合 hitSize / 代表类型 hitSize，和身体贴图/腿/履带同一个系数），
+        // 否则巨兽的力场会缩在放大后的身体里面。
+        {
+            float memRad = memberFieldRadius(UnitTypes.oct);
+            float bodyScl = mega.hitSize() / UnitTypes.oct.hitSize;   // 代表类型是 oct（两台）
+            float rad = fieldRadius(mega);
+            System.out.println("[MF] 力场半径: 成员 oct=" + memRad + " × 体型系数 " + String.format("%.3f", bodyScl)
+                + " = " + String.format("%.1f", memRad * bodyScl) + "，巨兽实际 " + rad
+                + "（体型 hitSize=" + mega.hitSize() + "，身体半径≈" + String.format("%.1f", mega.hitSize() / 2f) + "）");
+            check("力场半径 = 成员半径最大值 × 体型缩放系数（" + rad + " ≈ " + (memRad * bodyScl) + "）",
+                Math.abs(rad - memRad * bodyScl) < 0.5f);
+            check("力场半径比单个成员的大（真的适配了放大后的身体，" + rad + " > " + memRad + "）", rad > memRad);
+            check("力场能罩住巨兽的身体（半径 " + rad + " > 身体半径 " + String.format("%.1f", mega.hitSize() / 2f) + "）",
+                rad > mega.hitSize() / 2f);
+
+            // 行为验证：在"成员半径之外、巨兽半径之内"放一发敌方子弹，它应该被巨兽的力场吸收。
+            // （只按成员的半径算的话，这一发会直接打在巨兽身上。）
+            if(mega.shield() > 0f){
+                // 力场有展开动画：radiusScale 从 0 每帧 lerp 到 1（原版 ForceFieldAbility.update），
+                // 先跑够帧数让力场真的展开到 radius，否则真实半径还是 0 附近。
+                run(80);
+                float mid = (memRad + rad) / 2f;
+                mindustry.entities.bullet.BulletType bt = new mindustry.entities.bullet.BasicBulletType(0f, 7f);
+                bt.lifetime = 600f;
+                bt.speed = 0f;
+                mindustry.gen.Bullet b = bt.create(mega, Team.crux, mega.x + mid, mega.y, 0f);
+                run(1);
+                boolean gone = b == null || !b.isAdded();
+                System.out.println("[MF] 力场吸收测试: 子弹放在距中心 " + (int)mid + "px（成员半径 " + (int)memRad
+                    + " 之外、巨兽半径 " + (int)rad + " 之内）→ " + (gone ? "被吸收" : "没被吸收"));
+                check("巨兽力场按放大后的半径挡子弹（该发被吸收）", gone);
+
+                // 对照组：巨兽半径之外的一发不该被吸收
+                mindustry.gen.Bullet b2 = bt.create(mega, Team.crux, mega.x + rad + 20f, mega.y, 0f);
+                run(1);
+                boolean gone2 = b2 == null || !b2.isAdded();
+                check("巨兽力场之外的一发不被吸收（对照组）", !gone2);
+                if(b2 != null && b2.isAdded()) b2.remove();
+            }
+        }
         check("flyingLayer 有效（不是 late-init 留下的 -1）", mega.type.flyingLayer > 0f);
         check("clipSize 有效（不是 -1，视口裁剪才有正常包围盒）", mega.type.clipSize > 0f);
         check("有武器挂座（成员武器没被 setType 清掉）", mega.mounts() != null && mega.mounts().length > 0);
@@ -354,7 +412,11 @@ public class MegaFieldTest implements ApplicationListener{
         run(60);
         System.out.println("[MF] 60 tick 后: elevation=" + mega.elevation + " 盾=" + mega.shield() + "/" + fieldMax(mega));
         check("有飞行成员时会升到飞行高度（elevation>0.5 → 走 flyingLayer）", mega.elevation > 0.5f);
-        check("升空后力墙 bar 仍不超上限（" + mega.shield() + "/" + fieldMax(mega) + "）", mega.shield() <= fieldMax(mega) + 0.01f);
+        // 容差说明：原版 ForceFieldAbility.update 是 `if(unit.shield < scaledMax) shield += delta*regen`，
+        // 一帧最多冲过上限 regen（这里两台 oct 合计 regen=8），**原版自己也会这样**；
+        // 关键是没有"多份力场各自算上限"那种成倍超限（以前 2 台就是 2×max）。
+        check("升空后力墙 bar 仍不超上限（" + mega.shield() + "/" + fieldMax(mega) + "，容差=regen 的一帧冲量）",
+            mega.shield() <= fieldMax(mega) + 8.01f);
 
         // 【拆不开的回归】悬在水面上的巨兽：地面成员近处没有落脚点。
         // 原来 findDropPos 只绕巨兽中心找几十像素，找不到就一直留在巨兽体内 ——

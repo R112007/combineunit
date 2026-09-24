@@ -456,8 +456,15 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
                 abs.add(a.copy());
             }
         }
-        if(mergedField != null)
+        if(mergedField != null){
+            // 【范围适配合体后的巨兽】盾容（max）已经按成员求和，半径也要跟着体型走：
+            // 原版 radius 是成员自己的固定值（corvus 140、nova 60…），直接沿用会让巨兽的力场
+            // "缩在身体里面"（用户要求："范围适配合体后的巨兽单位"）。按同一个体型缩放系数
+            // bodyScale()（= 综合 hitSize / 代表类型 hitSize，和身体贴图/腿/履带同源）放大，
+            // 力场就正好罩住放大后的身体。
+            mergedField.radius *= Math.max(bodyScale(), 1f);
             abs.add(mergedField);
+        }
 
         int n = ws.size;
         float rad = hitSize() * 0.55f;
