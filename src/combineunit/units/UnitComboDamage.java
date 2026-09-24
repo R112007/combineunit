@@ -50,6 +50,9 @@ public class UnitComboDamage{
     /** 原版实体类 -> 组合实体构造器。 */
     private static final ObjectMap<Class<?>, Prov<Unit>> mirrors = new ObjectMap<>();
 
+    /** 正在执行"别的模组的脚本构造器"的深度，见 {@link #wrapScript(Prov)} / {@link #scriptAware(Prov, Prov)}。 */
+    private static int scriptCtorDepth;
+
     /** 在 mod init 时调用：替换全部原版单位实体。 */
     public static void register(){
         initMirrors();
@@ -57,9 +60,58 @@ public class UnitComboDamage{
         replaceEntityMapping();
     }
 
-    /** 替换所有单位类型的 constructor（影响本地生产/生成）。 */
+    /**
+     * 别的模组（尤其是 JS 模组）常见的写法是：
+     * <pre>
+     *   MyUnit.constructor = prov(() =&gt; extend(UnitTypes.eclipse.constructor.get().class, {}));
+     * </pre>
+     * 也就是**拿某个原版单位构造器产出实例的 class 当自己的超类**。我们把原版单位的构造器换成了
+     * combineunit 的镜像类（{@code CUnitEntity} 等）之后，这句 extend 拿到的就是**模组类** ——
+     * 安卓上 Rhino 的 JavaAdapter 是在"内存 dex"里定义适配器类的，而那个类加载器的父级是游戏类加载器，
+     * **看不见别的模组（包括我们）的类**，于是定义失败（用户报的"和 CT 模组冲突"崩溃日志）：
+     * <pre>
+     *   Failed to define class ... ClassNotFoundException: Didn't find class "adapter39"
+     *   Suppressed: NoClassDefFoundError: Failed resolution of: Lcombineunit/units/entities/CUnitEntity;
+     * </pre>
+     * 异常从 register() 抛出去 → 整个 combineunit 加载失败、游戏崩。
+     *
+     * <p>对策两条：<br>
+     * ① **两阶段替换**（见 {@link #replaceUnitConstructors()}）：先把所有类型的构造器取样一遍
+     *（脚本的适配器都在"原版构造器还都在"的时候建好、并被 Rhino 缓存），之后再统一替换；<br>
+     * ② **脚本感知的镜像构造器**（{@link #scriptAware(Prov, Prov)}）：在别的模组的脚本构造器
+     * 执行期间返回**原版实例**，脚本拿到的 class 就是游戏自己的类，适配器照旧能定义/命中缓存；
+     * 游戏自己创建单位时（没有脚本在执行）才返回镜像类。
+     */
+    private static Prov<Unit> wrapScript(final Prov<? extends Unit> inner){
+        return () -> {
+            scriptCtorDepth++;
+            try{
+                return inner.get();
+            }finally{
+                scriptCtorDepth--;
+            }
+        };
+    }
+
+    /** 镜像构造器：脚本执行期间退化成原版实例，其余时候给镜像（见 {@link #wrapScript(Prov)}）。 */
+    private static Prov<Unit> scriptAware(final Prov<? extends Unit> vanilla, final Prov<Unit> mirror){
+        return () -> scriptCtorDepth > 0 ? vanilla.get() : mirror.get();
+    }
+
+    /**
+     * 替换所有单位类型的 constructor（影响本地生产/生成）。
+     *
+     * <p>【两阶段】取样会触发别的模组构造器里的懒加载脚本，必须让这些脚本在"所有原版构造器都还没被
+     * 换掉"的时候跑完（见 {@link #wrapScript(Prov)}），否则脚本里那句
+     * {@code extend(...constructor.get().class)} 会继承到模组类、在安卓上直接把模组加载搞崩。
+     * 所以先把所有类型取样、记账，再统一替换。
+     */
     @SuppressWarnings("unchecked")
     private static void replaceUnitConstructors(){
+        Seq<UnitType> types = new Seq<>();
+        Seq<Prov<? extends Unit>> ctors = new Seq<>();
+        Seq<Class<?>> classes = new Seq<>();
+
         for(UnitType type : Vars.content.units()){
             Prov<? extends Unit> ctor = type.constructor;
             if(ctor == null) continue;
@@ -67,10 +119,8 @@ public class UnitComboDamage{
             // 本来就不参与组合（groupable() 里明确排除），换它们的构造器没有任何收益，
             // 反而会坑到别的模组：实测作弊模组 invincible-cheat-mod-v8 的 JS 单位写的是
             //   m.constructor = prov(() => extend(UnitTypes.alpha.constructor.get().class, {...}))
-            // 我们把 alpha 的构造器换成了 combineunit 的镜像类之后，它继承的就是**模组类**；
-            // 安卓上 Rhino 的 JavaAdapter 在内存 dex 里解析不了模组类
-            //（崩溃日志：Failed resolution of: Lcombineunit/units/entities/CUnitEntityLegacyAlpha）
-            // → 适配器定义失败 → 异常从 register() 抛出去 → 整个 combineunit 加载失败、游戏崩。
+            // 我们把 alpha 的构造器换成镜像类之后，它继承的就是**模组类**，安卓上直接炸
+            //（崩溃日志：Failed resolution of: Lcombineunit/units/entities/CUnitEntityLegacyAlpha）。
             // 保持核心机是原版类，别的模组（包括这个作弊模组）继承它就一切照旧。
             if(UnitComboMerge.isCoreUnit(type)) continue;
             // 【取样必须容错】构造器可能是别的模组（JS/Rhino JavaAdapter）写的动态类，get() 会抛；
@@ -83,8 +133,20 @@ public class UnitComboDamage{
                 continue;
             }
             if(sample == null) continue;
-            Prov<Unit> rep = mirrors.get(sample.getClass());
-            if(rep != null) type.constructor = rep;
+            types.add(type);
+            ctors.add(ctor);
+            classes.add(sample.getClass());
+        }
+
+        for(int i = 0; i < types.size; i++){
+            UnitType type = types.get(i);
+            Prov<? extends Unit> ctor = ctors.get(i);
+            Prov<Unit> rep = mirrors.get(classes.get(i));
+            // ① 原版实体类 → 换成镜像（脚本执行期间自动退化成原版实例，见 scriptAware）；
+            // ② 别的模组自己的实体类（Rhino 适配器等）→ 原样保留行为，只包一层"脚本构造器"标记，
+            //    这样它们在运行期被游戏调用时，内部那句 extend(原版 type.constructor.get().class)
+            //    同样能拿到游戏自己的类。
+            type.constructor = rep != null ? scriptAware(ctor, rep) : wrapScript(ctor);
         }
     }
 
@@ -96,7 +158,8 @@ public class UnitComboDamage{
             Class<?> cls = sampleClass(prov, "实体名 " + name);
             if(cls == null) return;
             Prov<Unit> rep = mirrors.get(cls);
-            if(rep != null) EntityMapping.nameMap.put(name, rep);
+            // 同样做成"脚本感知"的：别的模组若拿这里的构造器产出物当超类，脚本执行期间要给原版实例。
+            if(rep != null) EntityMapping.nameMap.put(name, scriptAware((Prov<? extends Unit>)prov, rep));
         });
 
         // 数字 ID 映射
@@ -106,7 +169,7 @@ public class UnitComboDamage{
             Class<?> cls = sampleClass(prov, "实体槽 " + i);
             if(cls == null) continue;
             Prov<Unit> rep = mirrors.get(cls);
-            if(rep != null) EntityMapping.idMap[i] = rep;
+            if(rep != null) EntityMapping.idMap[i] = scriptAware((Prov<? extends Unit>)prov, rep);
         }
     }
 

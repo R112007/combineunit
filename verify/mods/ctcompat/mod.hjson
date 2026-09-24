@@ -1,0 +1,8 @@
+{
+  name: "ctcompat"
+  displayName: "CT 兼容复现（verify 用）"
+  author: "verify"
+  description: "复现 CT2起源（creators）里 prov(() => extend(UnitTypes.<原版>.constructor.get().class, {})) 的写法，用来验证 combineunit 不会让别的模组继承到镜像类"
+  version: "1.0"
+  minGameVersion: "140"
+}
