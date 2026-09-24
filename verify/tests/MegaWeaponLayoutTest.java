@@ -52,6 +52,61 @@ public class MegaWeaponLayoutTest implements ApplicationListener{
     static boolean hasLeftSingle(UnitType t){ for(Weapon w : t.weapons) if(w.bullet != null && w.otherSide < 0 && w.x < -0.5f) return true; return false; }
     static boolean hasMirror(UnitType t){ for(Weapon w : t.weapons) if(w.bullet != null && w.otherSide >= 0) return true; return false; }
 
+    /** 按挂载顺序对上成员武器表，收集每把 x≈0 武器的落点（key = 成员类型名|武器名）。 */
+    static java.util.LinkedHashMap<String, java.util.List<float[]>> midGroupsOf(Unit beast, Seq<UnitType> comp){
+        java.util.LinkedHashMap<String, java.util.List<float[]>> m = new java.util.LinkedHashMap<>();
+        if(beast == null || beast.mounts() == null) return m;
+        WeaponMount[] ms = beast.mounts();
+        int idx = 0;
+        for(UnitType t : comp){
+            for(Weapon ow : t.weapons){
+                if(ow.bullet == null || idx >= ms.length) continue;
+                if(Math.abs(ow.x) < 0.5f){
+                    m.computeIfAbsent(t.name + "|" + ow.name, k -> new java.util.ArrayList<>())
+                        .add(new float[]{ms[idx].weapon.x, ms[idx].weapon.y});
+                }
+                idx++;
+            }
+        }
+        return m;
+    }
+
+    /**
+     * 【x=0 武器的落位规则（用户要求）】同一成员的同一把武器：
+     * <ul>
+     *     <li>组里 1 把  → 留在中间列（x=0）；</li>
+     *     <li>组里 ≥2 把 → 成对分到两侧的圆上（左侧 = x 取反、y 相同），奇数剩的那把留中间列。</li>
+     * </ul>
+     * groups: key = 成员类型|武器名，value = 该组每把武器落位后的 (x,y)。
+     */
+    static boolean midGroupsOk(java.util.LinkedHashMap<String, java.util.List<float[]>> groups, float rad, String tag){
+        int ok = 0, n = 0;
+        StringBuilder d = new StringBuilder();
+        for(java.util.Map.Entry<String, java.util.List<float[]>> e : groups.entrySet()){
+            java.util.List<float[]> v = e.getValue();
+            n++;
+            int atX0 = 0, rightSide = 0, leftSide = 0, sym = 0, onCirc = 0;
+            for(float[] p : v){
+                if(Math.abs(p[0]) < 0.01f){ atX0++; continue; }
+                if(p[0] > 0f) rightSide++; else leftSide++;
+                if(Math.abs(arc.math.Mathf.len(p[0], p[1]) - rad) <= Math.max(rad * 0.1f, 1.5f)) onCirc++;
+                for(float[] q : v){
+                    if(Math.abs(q[0]) > 0.01f && Math.abs(p[0] + q[0]) < 0.01f && Math.abs(p[1] - q[1]) < 0.01f){ sym++; break; }
+                }
+            }
+            boolean gok = v.size() == 1
+                ? atX0 == 1
+                : atX0 == v.size() % 2 && rightSide == leftSide && rightSide >= 1
+                  && sym == v.size() - atX0 && onCirc == v.size() - atX0;
+            if(gok) ok++;
+            d.append("\n      ").append(e.getKey()).append(": ").append(v.size()).append(" 把 → x=0 ")
+             .append(atX0).append(" 把、右 ").append(rightSide).append(" / 左 ").append(leftSide)
+             .append("（圆上 ").append(onCirc).append("、镜像成对 ").append(sym).append("）").append(gok ? "" : " ✗");
+        }
+        System.out.println("[MWL] " + tag + "：x=0 武器的落位规则（按成员类型+武器名分组）:" + d);
+        return n > 0 && ok == n;
+    }
+
     @Override public void init(){
       try{
         Core.settings.setDataDirectory(Core.files.local(dataDir));
@@ -136,6 +191,9 @@ public class MegaWeaponLayoutTest implements ApplicationListener{
             midB.x = 0f; midB.y = 4f;   // 原版 flip() 只把 x 取反，x=0 的副本仍是 x=0、y 不变
             midB.bullet = new mindustry.entities.bullet.BasicBulletType(2f, 1f);
             midB.bullet.range = 100f;
+            // 镜像副本与原版**同名同源**（Weapon.copy() 不改名字）——实现就是按"成员类型 + 武器名"
+            // 认"相同单位的相同武器"的，所以这里必须同名，否则测不到那条规则。
+            midB.name = midA.name;
             UnitTypes.dagger.weapons.add(midA);
             int midAIdx = UnitTypes.dagger.weapons.size - 1;
             UnitTypes.dagger.weapons.add(midB);
@@ -143,7 +201,7 @@ public class MegaWeaponLayoutTest implements ApplicationListener{
             midA.otherSide = midBIdx;
             midB.otherSide = midAIdx;
             System.out.println("[MWL] 已给 dagger 追加 x=0 的镜像对（索引 " + midAIdx + "/" + midBIdx
-                + "，模拟原版 init 对 mirror=true 且 x=0 的展开）");
+                + "，模拟原版 init 对 mirror=true 且 x=0 的展开，两把同名）");
         }
 
         // 凑一只巨兽：每个成员记录它自己的武器表（挂载顺序 = 成员顺序 × 成员武器顺序）
@@ -170,23 +228,28 @@ public class MegaWeaponLayoutTest implements ApplicationListener{
             check("拼出一只巨兽（前置）", true);
             float rad = Math.max(beast.hitSize() * 0.55f, 6f);
             WeaponMount[] ms = beast.mounts();
-            int idx = 0, midOk = 0, midN = 0, rightOk = 0, rightN = 0, leftOk = 0, leftN = 0, pairOk = 0, pairN = 0;
-            int midPairOk = 0, midPairN = 0;
+            int idx = 0, rightOk = 0, rightN = 0, leftOk = 0, leftN = 0, pairOk = 0, pairN = 0;
+            // x=0 的原始武器按"成员类型 + 武器名"分组（与实现同一套 key），逐组核对落位规则
+            java.util.LinkedHashMap<String, java.util.List<float[]>> midGroups = new java.util.LinkedHashMap<>();
             StringBuilder detail = new StringBuilder();
             for(UnitType t : memberTypes){
                 for(Weapon ow : t.weapons){
                     if(ow.bullet == null || idx >= ms.length) continue;
                     Weapon nw = ms[idx].weapon;
                     float ox0 = ow.x;
-                    // x=0 的镜像对（原版 init 对 mirror=true 且 x=0 的展开）**不算"镜像对"，算中间列**：
-                    // 分类顺序必须以"|x|<0.5 → 中间列"为准，否则这一对会被扔到圆弧上（落在后半圈）。
-                    boolean midPair = Math.abs(ox0) < 0.5f && ow.otherSide >= 0 && nw.otherSide >= 0;
-                    boolean pair = !midPair && ow.otherSide >= 0 && nw.otherSide >= 0;
+                    // x=0（|x|<0.5）的武器先归"正中候选"，具体落位按下面的分组规则判；
+                    // 镜像对只在 |x|>=0.5 时才按"镜像对"处理（分类顺序以"正中优先"为准）。
+                    boolean midCand = Math.abs(ox0) < 0.5f;
+                    boolean pair = !midCand && ow.otherSide >= 0 && nw.otherSide >= 0;
                     float len = arc.math.Mathf.len(nw.x, nw.y);
                     boolean ok;
-                    if(midPair){
-                        ok = Math.abs(nw.x) < 0.01f;
-                        midPairN++; if(ok) midPairOk++;
+                    if(midCand){
+                        // 正中候选：留中间（x=0）或分到圆上（|位置|=rad）都算"在布局上"，严格判定按组走
+                        boolean onX0 = Math.abs(nw.x) < 0.01f;
+                        boolean onCircle = Math.abs(len - rad) <= Math.max(rad * 0.1f, 1.5f);
+                        ok = onX0 || onCircle;
+                        midGroups.computeIfAbsent(t.name + "|" + ow.name, k -> new java.util.ArrayList<>())
+                            .add(new float[]{nw.x, nw.y});
                     }else if(pair){
                         Weapon other = ms[nw.otherSide].weapon;
                         // 镜像对：严格左右对称（x 取反、y 相同），且落在圆上
@@ -196,10 +259,6 @@ public class MegaWeaponLayoutTest implements ApplicationListener{
                             && Math.signum(nw.x) != Math.signum(other.x)
                             && Math.abs(nw.x) > 0.01f;
                         pairN++; if(ok) pairOk++;
-                    }else if(Math.abs(ox0) < 0.5f){
-                        // 中间列 = 一条直线：x=0
-                        ok = Math.abs(nw.x) < 0.01f;
-                        midN++; if(ok) midOk++;
                     }else{
                         // 两侧 = 围成圆：落在半径 rad 的圆弧上，且在自己那一侧
                         ok = Math.abs(len - rad) <= Math.max(rad * 0.1f, 1.5f)
@@ -208,16 +267,17 @@ public class MegaWeaponLayoutTest implements ApplicationListener{
                     }
                     detail.append("\n      [").append(idx).append("] 原 x=").append((int)ox0).append(" → 新 x=")
                           .append((int)nw.x).append(",y=").append((int)nw.y)
-                          .append("（|位置|=").append((int)len).append(pair ? " 镜像对" : "").append(midPair ? " x=0镜像对" : "").append("）")
+                          .append("（|位置|=").append((int)len).append(pair ? " 镜像对" : "").append(midCand ? " 正中" : "").append("）")
                           .append(ok ? "" : " ✗");
                     idx++;
                 }
             }
             System.out.println("[MWL] 落位（半径 rad=" + (int)rad + "）:" + detail);
-            check("x=0 且互为镜像的武器（原版 init 展开的那对）留在中间列（x=0）："
-                + midPairOk + "/" + midPairN, midPairN == 0 || midPairOk == midPairN);
-            if(midN > 0){
-                check("x=0 的武器在中间一条直线上（x=0）：" + midOk + "/" + midN, midOk == midN);
+
+            check("x=0 武器：≥2 把分到两边的圆上、奇数剩一把留中间（主编组）",
+                midGroupsOk(midGroups, rad, "主编组"));
+
+            {
                 // 中间这一列必须**以单位中心为中心**：y 之和 ≈ 0（关于 y=0 对称），奇数把数时中间那把正好在 y=0
                 float sumY = 0f, minY = 9e9f, maxY = -9e9f;
                 int midCount = 0;
@@ -271,21 +331,19 @@ public class MegaWeaponLayoutTest implements ApplicationListener{
                 }catch(Throwable t){ System.out.println("[MWL] 中间枪编组融合失败: " + t); }
             }
             if(midBeast != null && midBeast.mounts() != null){
-                float sumY = 0f; int cnt = 0, atZero = 0; float minY = 9e9f, maxY = -9e9f;
+                // 3 把"同一成员的同一把正中枪" → 按新规则：1 对分到两侧圆上 + 1 把留中间（y=0）
+                Seq<UnitType> comp2 = new Seq<>();
+                for(int i = 0; i < 3; i++) comp2.add(midType);
+                java.util.LinkedHashMap<String, java.util.List<float[]>> g2 = midGroupsOf(midBeast, comp2);
+                int atZero = 0; float sumY = 0f;
                 for(WeaponMount m : midBeast.mounts()){
-                    if(Math.abs(m.weapon.x) < 0.01f){
-                        sumY += m.weapon.y; cnt++;
-                        if(Math.abs(m.weapon.y) < 0.01f) atZero++;
-                        minY = Math.min(minY, m.weapon.y); maxY = Math.max(maxY, m.weapon.y);
-                    }
+                    if(Math.abs(m.weapon.x) < 0.01f){ sumY += m.weapon.y; if(Math.abs(m.weapon.y) < 0.01f) atZero++; }
                 }
-                System.out.println("[MWL] 3×" + midType.name + " 的巨兽：中间列 " + cnt + " 把、y 之和="
-                    + String.format("%.2f", sumY) + "、范围 " + String.format("%.1f", minY) + "~" + String.format("%.1f", maxY)
-                    + "、正好在中心的 " + atZero + " 把");
-                check("多把中间枪时整列仍以单位中心为中心（y 之和 ≈ 0）", cnt == 0 || Math.abs(sumY) < 0.01f);
-                if(cnt % 2 == 1) check("奇数把中间枪时有一把正好在中心（y=0）", atZero >= 1);
-                check("中间枪的 y 关于中心对称（max + min ≈ 0，"
-                    + String.format("%.2f", maxY + minY) + "）", cnt == 0 || Math.abs(maxY + minY) < 0.01f);
+                System.out.println("[MWL] 3×" + midType.name + " 的巨兽：留在中间列 " + atZero + " 把（y 之和="
+                    + String.format("%.2f", sumY) + "），其余按规则分到两侧圆上");
+                check("3×" + midType.name + "（同一把正中枪 3 份）：1 对分两边 + 1 把留中间",
+                    midGroupsOk(g2, Math.max(midBeast.hitSize() * 0.55f, 6f), "3×" + midType.name));
+                check("3×" + midType.name + " 时留在中间的那把正好在单位中心（y=0，" + atZero + " 把）", atZero == 1);
             }
         }
 
@@ -333,22 +391,23 @@ public class MegaWeaponLayoutTest implements ApplicationListener{
                               .append((int)nw.x).append(",y=").append((int)nw.y);
                             if(Math.abs(own.x) < 0.5f){
                                 midWeapons++;
-                                if(Math.abs(nw.x) < 0.01f) midOnX0++;
-                                sumY += nw.y; minY = Math.min(minY, nw.y); maxY = Math.max(maxY, nw.y);
+                                if(Math.abs(nw.x) < 0.01f){
+                                    midOnX0++;
+                                    sumY += nw.y; minY = Math.min(minY, nw.y); maxY = Math.max(maxY, nw.y);
+                                }
                             }
                             idx3++;
                         }
                     }
                     System.out.println("[MWL] 3 toxopid + 3 pulsar + elude 的巨兽落位:" + d3);
-                    System.out.println("[MWL] 该编组: x=0 的武器 " + midWeapons + " 把（仍在 x=0 的 "
-                        + midOnX0 + " 把）、y 之和=" + String.format("%.2f", sumY)
+                    System.out.println("[MWL] 该编组: x=0 的武器 " + midWeapons + " 把（留在中间的 "
+                        + midOnX0 + " 把）、中间列 y 之和=" + String.format("%.2f", sumY)
                         + "、范围 " + String.format("%.1f", minY) + "~" + String.format("%.1f", maxY));
-                    check("用户编组里 x=0 的武器仍然落在中间（x=0）：" + midOnX0 + "/" + midWeapons,
-                        midWeapons == 0 || midOnX0 == midWeapons);
-                    check("用户编组里 x=0 的武器坐标关于单位中心对称（y 之和 ≈ 0，"
-                        + String.format("%.2f", sumY) + "）", midWeapons == 0 || Math.abs(sumY) < 0.01f);
-                    check("用户编组里 x=0 的武器 y 范围关于中心对称（max+min ≈ 0，"
-                        + String.format("%.2f", maxY + minY) + "）", midWeapons == 0 || Math.abs(maxY + minY) < 0.01f);
+                    // 新规则：3 把同成员的同一把 toxopid-cannon → 1 对分到两侧圆上 + 1 把留中间（y=0）
+                    check("用户编组：x=0 武器的分边规则（≥2 把分两边、奇数剩一把留中间）",
+                        midGroupsOk(midGroupsOf(big, comp), Math.max(big.hitSize() * 0.55f, 6f), "用户编组"));
+                    check("用户编组：中间列以单位中心为中心（y 之和 ≈ 0，"
+                        + String.format("%.2f", sumY) + "）", midWeapons == 0 || midOnX0 == 0 || Math.abs(sumY) < 0.01f);
                 }
             }
         }

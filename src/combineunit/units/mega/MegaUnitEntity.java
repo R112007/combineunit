@@ -372,6 +372,9 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
      */
     private void rebuildMounts(){
         Seq<Weapon> ws = new Seq<>();
+        // 每个挂载"来自哪个成员类型"（按成员类型的 content id 记）——排布时要用它把
+        // "**同一成员的同一把** x=0 武器"归成一组（用户要求，见 layoutWeapons）。
+        arc.struct.IntSeq wsOwner = new arc.struct.IntSeq();
         Seq<Ability> abs = new Seq<>();
         // 力场（ForceFieldAbility）要**合并成一份**，不能按成员各留一份：
         //  · 各自的 max 只覆盖自己那份，而巨兽的护盾池是全员之和（融合时 mega.shield(Σ)），
@@ -410,6 +413,7 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
                     c.otherSide = pos < 0 ? -1 : base + pos;
                 }
                 ws.add(c);
+                wsOwner.add(t.id);
             }
             if(mws.size > 0) groups.add(mws);
             for(Ability a : t.abilities){
@@ -439,7 +443,7 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         //   · mirror=false 且 x>0 → 圆圈的右半边；x<0 → 左半边。
         // 原版武器 (x, y)：x 是横向偏移、y 是纵向偏移。分类必须看**改位置之前**的 x/y
         //（先记下来再统一落位，否则改完第一把就分不清了）。
-        layoutWeapons(ws);
+        layoutWeapons(ws, wsOwner);
         WeaponMount[] arr = new WeaponMount[n];
         for(int i = 0; i < n; i++){
             arr[i] = ws.get(i).mountType.get(ws.get(i));
@@ -476,14 +480,18 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
     /**
      * 摆武器（用户要求，见 {@link #refreshDerived} 里调用处的说明）：
      * <ul>
-     *     <li><b>中间那列是一条直线</b>：x≈0（|x| &lt; 0.5）的武器排成 x=0 的竖线，按原本的前后顺序等距；</li>
+     *     <li><b>x≈0（|x| &lt; 0.5）的武器按"同一成员的同一把武器"分组</b>（用户要求）：
+     *         组里 ≥2 把 → 成对分到两侧的圆上（严格左右对称），奇数剩的那把留在中间列；
+     *         组里只有 1 把 → 留在中间列。中间那列仍是一条 x=0 的竖直线，以单位中心为中心等距；</li>
      *     <li><b>两边围成一个圆</b>：镜像对（`otherSide` 互指，原版 mirror=true 展开出来的那对）
      *         与"只有一边"的武器都落在半径 rad 的**圆弧**上，各自待在自己那一侧；</li>
      *     <li>镜像对严格左右对称（x 取反、y 相同），即圆弧上同一个角度的镜像点。</li>
      * </ul>
      * 角度约定与原版一致：0° = 正右（+x）、90° = 正前（+y）、180° = 正左（−x）。
+     *
+     * @param owner 每把武器来自哪个成员类型（按 content id）——用来判定"相同单位的相同武器"。
      */
-    private void layoutWeapons(Seq<Weapon> ws){
+    private void layoutWeapons(Seq<Weapon> ws, arc.struct.IntSeq owner){
         int n = ws.size;
         if(n <= 0) return;
         float rad = Math.max(hitSize() * 0.55f, 6f);      // 两侧"武器圆"的半径
@@ -494,7 +502,7 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             ox[i] = w.x;
             oy[i] = w.y;
         }
-        Seq<Integer> pairRight = new Seq<>(), mid = new Seq<>(), right = new Seq<>(), left = new Seq<>();
+        Seq<Integer> pairRight = new Seq<>(), midCand = new Seq<>(), right = new Seq<>(), left = new Seq<>();
         for(int i = 0; i < n; i++){
             Weapon w = ws.get(i);
             int os = w.otherSide;
@@ -502,9 +510,9 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             // 有的单位（或其 mod）把正中间那门主炮定义成 mirror=true —— 原版 init 会把它展开成
             // **一对 x 都是 0** 的武器、两把用 otherSide 互指。先判镜像对的话，这一对会被扔到两侧的
             // 圆弧上，圆弧分配还能把它们摆到后半圈（"中间的武器全跑单位后面去了"）。
-            // x≈0 的一律进中间那条直线，且整列关于单位中心对称（用户要求）。
+            // x≈0 的一律先进"中间候选"，再由下面的分组规则决定"留中间"还是"分两边"。
             if(Math.abs(ox[i]) < 0.5f){
-                mid.add(i);
+                midCand.add(i);
                 continue;
             }
             if(os >= 0 && os < n && os != i){
@@ -515,10 +523,56 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             if(ox[i] > 0f) right.add(i);
             else left.add(i);
         }
+
+        // ---- x≈0 的武器：按"同一成员的同一把武器"分组（用户要求）----
+        // 组里 ≥2 把 → 分到两边的圆上：先跟"自己记着的镜像搭档"（otherSide）配对，否则跟组里下一把
+        // 没配的配对，配好的成对落成"左 (x 取反, y 相同)"；奇数剩的那把留在中间列。
+        // 组里只有 1 把 → 留在中间列。
+        Seq<Integer> mid = new Seq<>();
+        Seq<Integer> dupRight = new Seq<>();
+        int[] dupLeft = new int[n];
+        java.util.Arrays.fill(dupLeft, -1);
+        {
+            Seq<Seq<Integer>> groups = new Seq<>();
+            Seq<String> keys = new Seq<>();
+            for(int k = 0; k < midCand.size; k++){
+                int i = midCand.get(k);
+                // key = 成员类型 id + 武器名（镜像副本与原版同名同源，所以"相同武器"会归到一组）
+                String key = (owner != null && i < owner.size ? owner.get(i) : -1) + "|" + ws.get(i).name;
+                int gi = keys.indexOf(key);
+                if(gi < 0){ keys.add(key); groups.add(new Seq<Integer>()); gi = keys.size - 1; }
+                groups.get(gi).add(i);
+            }
+            for(int g = 0; g < groups.size; g++){
+                Seq<Integer> grp = groups.get(g);
+                if(grp.size < 2){ mid.add(grp.get(0)); continue; }
+                boolean[] taken = new boolean[grp.size];
+                for(int q = 0; q < grp.size; q++){
+                    if(taken[q]) continue;
+                    int ri = grp.get(q);
+                    int os = ws.get(ri).otherSide;
+                    int match = -1;
+                    for(int r = q + 1; r < grp.size; r++){
+                        if(taken[r]) continue;
+                        if(match < 0) match = r;                     // 兜底：组里下一把没配的
+                        if(grp.get(r) == os){ match = r; break; }     // 优先：自己记着的镜像搭档
+                    }
+                    if(match < 0) continue;                          // 这把就是奇数剩下的那把
+                    taken[q] = taken[match] = true;
+                    int li = grp.get(match);
+                    dupRight.add(ri);
+                    dupLeft[ri] = li;
+                }
+                for(int q = 0; q < grp.size; q++) if(!taken[q]) mid.add(grp.get(q));
+            }
+        }
         sortIdxByY(mid, oy);
+        boolean[] inMid = new boolean[n];
+        for(int k = 0; k < mid.size; k++) inMid[mid.get(k)] = true;
         sortIdxByY(right, oy);
         sortIdxByY(left, oy);
         sortIdxByY(pairRight, oy);
+        sortIdxByY(dupRight, oy);
 
         // ---- 中间：一条竖直线（x=0），**以单位中心为中心**等距排开 ----
         // 1 把 → 正好在中心（y=0）；2 把 → ±rowGap/2；3 把 → -rowGap / 0 / +rowGap …… 永远关于 y=0 对称，
@@ -531,18 +585,29 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
 
         // ---- 两侧：落在圆弧上（各自半边），镜像对严格左右对称 ----
         float span = 150f;                                  // 每半边可用弧度（度）
-        Seq<Integer> rightItems = new Seq<>();              // 右半边要摆的"项"：镜像对 + 右侧单武器
+        Seq<Integer> rightItems = new Seq<>();              // 右半边要摆的"项"：镜像对 + x=0 分过来的 + 右侧单武器
         rightItems.addAll(pairRight);
+        rightItems.addAll(dupRight);
         rightItems.addAll(right);
         sortIdxByY(rightItems, oy);
         Seq<Float> leftUsed = new Seq<>();                  // 记录左半边已被镜像搭档占用的角度（左单武器避让）
         for(int k = 0; k < rightItems.size; k++){
             float a = rightItems.size == 1 ? 0f : (-span / 2f + k * span / (rightItems.size - 1));
-            Weapon w = ws.get(rightItems.get(k));
+            int ri = rightItems.get(k);
+            Weapon w = ws.get(ri);
             w.x = Mathf.cosDeg(a) * rad;
             w.y = Mathf.sinDeg(a) * rad;
             int os = w.otherSide;
-            if(os >= 0 && os < n){
+            if(dupLeft[ri] >= 0){
+                // x=0 分过来的那把：左侧搭档摆成严格镜像（x 取反、y 相同）。
+                // 优先于 otherSide：分组时已经挑过"自己记着的镜像搭档"，这里以分组结果为准，
+                // 免得 otherSide 指到别的成员的挂载上、把中间列的武器拽到圆上来。
+                Weapon other = ws.get(dupLeft[ri]);
+                other.x = -w.x;
+                other.y = w.y;
+                leftUsed.add(180f - a);
+            }else if(os >= 0 && os < n && os != ri && !inMid[os]){
+                // 镜像对：搭档也搬到圆弧上、严格左右对称
                 Weapon other = ws.get(os);
                 other.x = -w.x;
                 other.y = w.y;
