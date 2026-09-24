@@ -1,6 +1,7 @@
 package combineunit.units;
 
 import arc.func.Prov;
+import arc.util.Log;
 import arc.struct.IntSeq;
 import arc.struct.ObjectMap;
 import arc.struct.Seq;
@@ -62,7 +63,27 @@ public class UnitComboDamage{
         for(UnitType type : Vars.content.units()){
             Prov<? extends Unit> ctor = type.constructor;
             if(ctor == null) continue;
-            Prov<Unit> rep = mirrors.get(ctor.get().getClass());
+            // 【核心机一律不换】alpha/beta/gamma/evoke/incite/emanate（以及任何 coreUnitDock 类型）
+            // 本来就不参与组合（groupable() 里明确排除），换它们的构造器没有任何收益，
+            // 反而会坑到别的模组：实测作弊模组 invincible-cheat-mod-v8 的 JS 单位写的是
+            //   m.constructor = prov(() => extend(UnitTypes.alpha.constructor.get().class, {...}))
+            // 我们把 alpha 的构造器换成了 combineunit 的镜像类之后，它继承的就是**模组类**；
+            // 安卓上 Rhino 的 JavaAdapter 在内存 dex 里解析不了模组类
+            //（崩溃日志：Failed resolution of: Lcombineunit/units/entities/CUnitEntityLegacyAlpha）
+            // → 适配器定义失败 → 异常从 register() 抛出去 → 整个 combineunit 加载失败、游戏崩。
+            // 保持核心机是原版类，别的模组（包括这个作弊模组）继承它就一切照旧。
+            if(UnitComboMerge.isCoreUnit(type)) continue;
+            // 【取样必须容错】构造器可能是别的模组（JS/Rhino JavaAdapter）写的动态类，get() 会抛；
+            // 一个类型取样失败不该拖垮整个模组加载：跳过它（那个单位不做承伤镜像，其余照常）。
+            Unit sample;
+            try{
+                sample = ctor.get();
+            }catch(Throwable t){
+                Log.warn("[combineunit] 单位类型 @ 的构造器取样失败（跳过承伤镜像）：@", type.name, t.toString());
+                continue;
+            }
+            if(sample == null) continue;
+            Prov<Unit> rep = mirrors.get(sample.getClass());
             if(rep != null) type.constructor = rep;
         }
     }
@@ -72,7 +93,9 @@ public class UnitComboDamage{
     private static void replaceEntityMapping(){
         // 名称映射：每个名字对应一个构造器，逐个取样判断类别
         EntityMapping.nameMap.each((name, prov) -> {
-            Prov<Unit> rep = mirrors.get((Class<?>)prov.get().getClass());
+            Class<?> cls = sampleClass(prov, "实体名 " + name);
+            if(cls == null) return;
+            Prov<Unit> rep = mirrors.get(cls);
             if(rep != null) EntityMapping.nameMap.put(name, rep);
         });
 
@@ -80,8 +103,25 @@ public class UnitComboDamage{
         for(int i = 0; i < EntityMapping.idMap.length; i++){
             Prov<?> prov = EntityMapping.idMap[i];
             if(prov == null) continue;
-            Prov<Unit> rep = mirrors.get(prov.get().getClass());
+            Class<?> cls = sampleClass(prov, "实体槽 " + i);
+            if(cls == null) continue;
+            Prov<Unit> rep = mirrors.get(cls);
             if(rep != null) EntityMapping.idMap[i] = rep;
+        }
+    }
+
+    /**
+     * 安全取样：拿构造器产出的实例的类；构造器是别的模组（JS/Rhino JavaAdapter）写的动态类时
+     * `get()` 可能抛（安卓上"内存 dex 解析不了模组类"就会），这里吞掉并返回 null ——
+     * 那个实体保持原样（不换镜像），但绝不让异常冒到 Mod.init() 外面把整个模组加载搞崩。
+     */
+    private static Class<?> sampleClass(Prov<?> prov, String what){
+        try{
+            Object o = prov.get();
+            return o == null ? null : o.getClass();
+        }catch(Throwable t){
+            Log.warn("[combineunit] @ 的构造器取样失败（保持原版实体，不换镜像）：@", what, t.toString());
+            return null;
         }
     }
 
