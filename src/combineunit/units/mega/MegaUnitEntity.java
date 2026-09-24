@@ -943,9 +943,20 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             // 原版是在 init() 里给船加 StatusEffects.wet 免疫的，巨兽 init() 没跑过 → 白吃这个减速）
             for(var immune : t.immunities)
                 ct.immunities.add(immune);
-            if(t.canBoost) ct.canBoost = true;
             if(t.canHeal) ct.canHeal = true;
         }
+        // 【助推（canBoost）一律不继承】见下面 applyLateDefaults 之后的注释块：
+        // 原版 `UnitComp.canShoot()` 是 `!disarmed && !(type.canBoost && isFlying())` ——
+        // **只要 type.canBoost 且"离地"（`isFlying()` 判定是 elevation >= 0.09，非常容易满足），
+        // 整只单位就不能开火**；而 `updateBoosting()` 的
+        // `shouldBoost = boost || onSolid() || (isFlying() && !canLand())`
+        // 还会让带助推的单位自己反复升空（撞到实心方块、或悬在别的落地单位上方时 canLand=false
+        // → 一直助推）→ 越升越高、永远 airborne。
+        // 巨兽的飞行模型是它**自己推导**的（有飞行成员才飞、其余一律落地，见 update()），
+        // 不需要原版这套"助推冲刺"：留着它的后果就是用户报的
+        // "陆辅（带助推）一合体就变内鬼"、"在空中时整个巨兽都不能攻击了"、
+        // "组了空军后固定飞天、整个巨兽直接瘫痪"。所以派生类型恒为 canBoost=false。
+        ct.canBoost = false;
         // range/maxRange 这里只给个兜底：真正的值在 rebuildMounts()（非静态、能读实例状态）
         // 里按"实测武器射程 + 枪口到中心距离"算好覆盖（compTypeFor 是静态方法，读不到实例字段）。
         ct.range = 260f;
