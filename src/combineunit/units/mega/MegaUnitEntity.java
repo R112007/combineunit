@@ -104,6 +104,8 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
     /** 履带（Tankc）的滚动相位。 */
     public transient float treadTime;
     private transient boolean walkedState;
+    /** 履带扬尘的节流计时（原版 TankComp 的 treadEffectTime）。 */
+    private transient float treadEffectTime;
     /**
      * 成员移动能力（构成推导）：有飞行成员就能飞、有海军成员就能游、有陆地成员就能跑。
      * 移动模式按当前地形动态选择（{@link #moveMode()}），不再用"多数决"定死一个形态——
@@ -755,8 +757,15 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         ct.drownTimeMultiplier = dom.drownTimeMultiplier;
 
         float spd = 0f, mineSpd = 0f, mineRange = 0f, buildSpd = 0f, buildRange = 0f;
+        // 【碾压（坦克履带）】原版坦克的碾压在 TankComp.update() 里按 `type.crushDamage`
+        //（每 tick 对压在身下的敌方建筑造成多少伤害）和 `type.crushFragile`
+        //（"脆弱"方块直接秒碎）走。巨兽派生类型从没推导过这两项 → 停在 0/false，
+        // 于是"坦克合体后碾不了东西"（用户问的"坦克合体后的履带绘制和碾压伤害还在吗"）。
+        // 口径：伤害取**最大值**（多台坦克不叠加 —— 巨兽是一个整体，压在建筑上的是"最狠的那副履带"，
+        // 而它覆盖的地面本来就比单台坦克大得多，已经天然更狠），脆弱方块"有一台能碾就能碾"（取并集）。
+        float crushDmg = 0f;
         int tier = -1, cap = 0, spdCount = 0;
-        boolean mineFloor = false, mineWalls = false;
+        boolean mineFloor = false, mineWalls = false, crushFrag = false;
         // 【环境适应按成员推导】合体单位必须能在"成员待得住的环境"里待得住。
         // 口径：envEnabled 取**并集**（有一个成员能在那种环境里活着，合体就活着 ——
         // 成员合体那一刻本来就都活着，所以当前环境必然在并集里）、
@@ -821,6 +830,8 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             if(hov) hoverOnly = true;
             if(!t.flying && !UnitComboMerge.isNaval(t) && !hov) groundWalker = true;
             if(t.allowLegStep) legStep = true;
+            crushDmg = Math.max(crushDmg, t.crushDamage);
+            crushFrag |= t.crushFragile;
         }
         if(envOn != 0) ct.envEnabled = envOn;
         if(envOff != ~0) ct.envDisabled = envOff;
@@ -846,6 +857,8 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         ct.buildSpeed = buildSpd;
         ct.buildRange = Math.max(buildRange, mindustry.Vars.buildingRange);
         ct.itemCapacity = Math.max(cap, 10);
+        ct.crushDamage = crushDmg;
+        ct.crushFragile = crushFrag;
 
         // 寻路代价（原版 UnitType.init 的同款指派；巨兽类型 late 注册、init 从不执行，
         // pathCost 停在 null——CommandAI.isNearObstacle / UnitGroup 寻路 / isPathImpassable
@@ -1659,6 +1672,57 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         legResetScale = bodyScale();
     }
 
+    /**
+     * 原版 {@code TankComp.update()} 的**碾压**部分（巨兽继承的是普通 UnitEntity，
+     * 生成类 UnitEntity 的接口表里没有 Tankc/TankComp，super.update() 不含这段，必须自己跑）：
+     * <ul>
+     *     <li>{@code type.crushFragile}：身周 8 格的**敌方**"脆弱"方块（{@code block.crushFragile}）直接秒碎；</li>
+     *     <li>{@code type.crushDamage}：碾压半径内的**敌方**建筑按
+     *         {@code crushDamage × Δt × 方块倍率 × state.rules.unitDamage(team)} 持续扣血，
+     *         能踩碎的方块（{@code unitMoveBreakable}）直接拆掉。</li>
+     * </ul>
+     * 半径口径与原版一致（{@code r = hitSize × 0.75 / tilesize}、判定用 {@code r-1} 格，
+     * 免得贴着墙走也把它碾了）——巨兽体型更大，覆盖的格子自然更多。
+     * 飞在空中（编组里有飞行成员、已升空）时不碾压；被缴械（disarmed）时也不碾。
+     */
+    private void updateCrush(){
+        UnitType t = type;
+        if(t == null || dead || disarmed || isFlying()) return;
+        boolean fragile = t.crushFragile;
+        boolean damage = t.crushDamage > 0f;
+        if(!fragile && !damage) return;
+
+        if(fragile){
+            for(int i = 0; i < arc.math.geom.Geometry.d8.length; i++){
+                arc.math.geom.Point2 off = arc.math.geom.Geometry.d8[i];
+                mindustry.gen.Building other = Vars.world.buildWorld(
+                    x + off.x * Vars.tilesize, y + off.y * Vars.tilesize);
+                if(other != null && other.team != team() && other.block.crushFragile){
+                    other.damage(team(), 999999999f);
+                }
+            }
+        }
+
+        if(!damage) return;
+        // 原版口径：走起来了才算碾压（履带在转 / 这一帧真的位移了）
+        if(!walked() && deltaLen() < 0.01f) return;
+        int r = Math.max((int)(hitSize * 0.75f / Vars.tilesize), 0);
+        float amount = t.crushDamage * arc.util.Time.delta * ((speedMultiplier() - 1f) / 5f + 1f)
+            * Vars.state.rules.unitDamage(team());
+        for(int dx = -r; dx <= r; dx++){
+            for(int dy = -r; dy <= r; dy++){
+                if(Math.max(Math.abs(dx), Math.abs(dy)) > r - 1) continue;
+                Tile tile = Vars.world.tileWorld(x + dx * Vars.tilesize, y + dy * Vars.tilesize);
+                if(tile == null) continue;
+                if(tile.build != null && tile.build.team != team()){
+                    tile.build.damage(team(), amount * tile.block().crushDamageMultiplier);
+                }else if(tile.block().unitMoveBreakable){
+                    mindustry.world.blocks.ConstructBlock.deconstructFinish(tile, tile.block(), self());
+                }
+            }
+        }
+    }
+
     /** 每帧更新身体部件的动画状态（腿的 IK / 机甲行走相位 / 履带滚动 / 爬虫摆动）。 */
     private void updateAttachments(){
         UnitType d = dominant;
@@ -1683,6 +1747,26 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         }else if(attKind == ATT_TANK){
             treadTime += len;
             walkedState = len > 0.001f;
+            // 【履带的"动起来"那部分】原版 TankComp.update() 里还有履带扬尘和履带滚动音，
+            // 巨兽没有这个组件，一并自己接上（否则履带图在转、地上不留痕、也没有声音）。
+            // 尺寸按体型缩放（原版那些除 4 的口径是"贴图坐标 → 世界坐标"）。
+            if(walkedState && !Vars.headless && !inFogTo(Vars.player.team())){
+                float scl = bodyScale();
+                treadEffectTime += arc.util.Time.delta;
+                if(treadEffectTime >= 6f && d.treadRects.length > 0){
+                    // 第一段履带永远在最后面（原版注释口径）
+                    var treadRect = d.treadRects[0];
+                    float xOffset = (-(treadRect.x + treadRect.width / 2f)) / 4f * scl;
+                    float yOffset = (-(treadRect.y + treadRect.height / 2f)) / 4f * scl;
+                    for(int i : Mathf.signs){
+                        Tmp.v1.set(xOffset * i, yOffset - treadRect.height / 2f / 4f * scl).rotate(rotation - 90);
+                        mindustry.entities.Effect.floorDustAngle(d.treadEffect,
+                            Tmp.v1.x + x, Tmp.v1.y + y, rotation + 180f);
+                    }
+                    treadEffectTime = 0f;
+                }
+                Vars.control.sound.loop(d.tankMoveSound, this, d.tankMoveVolume);
+            }
         }
     }
 
@@ -1862,6 +1946,10 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         // 身体部件（腿/机甲腿/履带/爬虫身）的动画：原版是实体组件在 super.update() 里跑的，
         // 巨兽没有这些组件，在这里按代表类型的部件种类自己驱动（绘制见 MegaUnitType）。
         updateAttachments();
+        // 【碾压】原版坦克的碾压在 TankComp.update() 里跑，而巨兽继承的是普通 UnitEntity
+        //（生成类 UnitEntity 的接口表里没有 Tankc/TankComp），super.update() 不含这段 ——
+        // 有坦克成员时必须自己跑一遍，否则"合体后履带还能画、但压不动东西"。
+        updateCrush();
         if(dead) return; // 死亡坠落由原版处理（fallSpeed）
         int mode = moveMode();
         float target = mode == MODE_FLY ? 1f : 0f;

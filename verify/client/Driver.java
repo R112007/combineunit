@@ -169,8 +169,23 @@ public class Driver extends Mod{
                 Timer.schedule(() -> shot("mid_layout_near"), 23f);
                 Timer.schedule(Driver::midDump, 25f);
                 Timer.schedule(() -> { Log.info("[drv] mid 模式结束 frames=@", frames); Core.app.exit(); }, 30f);
+            }else if(mode.equals("tank")){
+                // 用户问："坦克合体后的履带绘制和碾压伤害还在吗" —— 履带得看真客户端。
+                // 两台 vanquish + 一台 conquer 融合，右边放一台单独的 vanquish 当参照；
+                // 让巨兽慢速往前开（履带要动起来才看得出滚动帧），相机钉在它身上。
+                installFrameCounter();
+                installCameraLock();
+                keepDialogsHidden();
+                Timer.schedule(Driver::setupMidScene, 5f);     // 同一套"找平地 + 放核心"
+                Timer.schedule(Driver::tankMerge, 10f);
+                Timer.schedule(Driver::tankDrive, 12f, 0.05f, 600);
+                Timer.schedule(Driver::tankReport, 16f);
+                Timer.schedule(() -> Vars.renderer.setScale(2.5f), 18f);
+                Timer.schedule(() -> shot("tank_mega"), 22f);
+                Timer.schedule(Driver::tankReport, 24f);
+                Timer.schedule(() -> { Log.info("[drv] tank 模式结束 frames=@", frames); Core.app.exit(); }, 30f);
             }else{
-                Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega|hover|icon|mid）", mode);
+                Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega|hover|icon|mid|tank）", mode);
                 Core.app.exit();
             }
         });
@@ -1213,6 +1228,59 @@ public class Driver extends Mod{
             Log.info("[drv] mid 巨兽 mounts=@ hitSize=@ rotation=@ x=0 的武器=@ 把（y 之和=@）:@",
                 mounts.length, midBeast.hitSize(), midBeast.rotation(), midN, String.format("%.2f", sumY), sb);
         }catch(Throwable t){ Log.err("[drv] midDump failed", t); }
+    }
+
+    // ---------------- tank（坦克巨兽的履带绘制 / 碾压） ----------------
+    static Unit tankBeast, tankRef;
+
+    static void tankMerge(){
+        try{
+            float cx = midOx * 8f, cy = midOy * 8f;
+            Seq<Unit> us = new Seq<>();
+            UnitType[] comp = {UnitTypes.vanquish, UnitTypes.vanquish, UnitTypes.conquer};
+            for(int i = 0; i < comp.length; i++){
+                Unit u = comp[i].create(Team.sharded);
+                u.set(cx - 40f + i * 30f, cy);
+                u.add();
+                us.add(u);
+            }
+            run(2);
+            Object mega = combineCall("combineunit.units.UnitComboMerge", "mergeSelected", new Class<?>[]{Seq.class}, us);
+            if(mega instanceof Unit mu){
+                mu.set(cx, cy);
+                tankBeast = mu;
+                camTarget = mu;
+                // 参照：单独一台 vanquish，放在巨兽右边同一张图里对比履带比例
+                tankRef = UnitTypes.vanquish.create(Team.sharded);
+                tankRef.set(cx + 150f, cy);
+                tankRef.add();
+            }else{
+                Log.err("[drv] tank: 融合失败（返回 @）", mega);
+            }
+        }catch(Throwable t){ Log.err("[drv] tankMerge failed", t); }
+    }
+
+    /** 让巨兽往前慢慢开（履带滚动帧只在走起来时变），路上铺一排脆弱的敌方方块给它压。 */
+    static void tankDrive(){
+        try{
+            if(tankBeast == null || !tankBeast.isAdded()) return;
+            tankBeast.rotation(90f);
+            tankBeast.vel().set(0f, 0.6f);
+            if(tankRef != null && tankRef.isAdded()) tankRef.rotation(90f);
+        }catch(Throwable t){ Log.err("[drv] tankDrive failed", t); }
+    }
+
+    static void tankReport(){
+        try{
+            if(tankBeast == null){ Log.err("[drv] tank: 没有巨兽"); return; }
+            var tc = (mindustry.gen.Tankc)tankBeast;
+            Log.info("[drv] tank 巨兽: hitSize=@ attKind=@ treadTime=@ walked=@ crushDamage=@ crushFragile=@ radius=@",
+                tankBeast.hitSize(), field(tankBeast, "attKind"), tc.treadTime(), tc.walked(),
+                tankBeast.type.crushDamage, tankBeast.type.crushFragile,
+                (int)(tankBeast.hitSize() * 0.75f / 8f));
+            Log.info("[drv] tank 参照（单台 vanquish）: treadRects=@ treadFrames=@ crushDamage=@",
+                UnitTypes.vanquish.treadRects.length, UnitTypes.vanquish.treadFrames, UnitTypes.vanquish.crushDamage);
+        }catch(Throwable t){ Log.err("[drv] tankReport failed", t); }
     }
 
     static void shot(String name){
