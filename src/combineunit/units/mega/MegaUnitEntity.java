@@ -498,13 +498,21 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         for(int i = 0; i < n; i++){
             Weapon w = ws.get(i);
             int os = w.otherSide;
+            // 【"正中"必须先判】分类顺序必须是"|x| < 0.5 → 中间列"**优先于**"otherSide 镜像对"：
+            // 有的单位（或其 mod）把正中间那门主炮定义成 mirror=true —— 原版 init 会把它展开成
+            // **一对 x 都是 0** 的武器、两把用 otherSide 互指。先判镜像对的话，这一对会被扔到两侧的
+            // 圆弧上，圆弧分配还能把它们摆到后半圈（"中间的武器全跑单位后面去了"）。
+            // x≈0 的一律进中间那条直线，且整列关于单位中心对称（用户要求）。
+            if(Math.abs(ox[i]) < 0.5f){
+                mid.add(i);
+                continue;
+            }
             if(os >= 0 && os < n && os != i){
                 // 镜像对：只按"x 大的那把"登记一次（搭档在落位时对称摆过去）
                 if(ox[i] >= ox[os]) pairRight.add(i);
                 continue;
             }
-            if(Math.abs(ox[i]) < 0.5f) mid.add(i);
-            else if(ox[i] > 0f) right.add(i);
+            if(ox[i] > 0f) right.add(i);
             else left.add(i);
         }
         sortIdxByY(mid, oy);

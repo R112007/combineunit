@@ -151,8 +151,26 @@ public class Driver extends Mod{
                 Timer.schedule(Driver::iconReport, 24f);
                 Timer.schedule(() -> shot("icon_panel"), 26f);
                 Timer.schedule(() -> { Log.info("[drv] icon 模式结束 frames=@", frames); Core.app.exit(); }, 30f);
+            }else if(mode.equals("mid")){
+                // 用户报："3 个 toxopid + 3 个 pulsar + 1 个 elude 合体后，中间的武器全跑单位后面去了。"
+                // 本模式复现这个编组：合体后把巨兽转正（rotation=90，屏幕上方 = 单位正前方）、
+                // 每帧把所有枪口钉在 90°（全部朝上），这样截图里**枪管的位置 = 挂载的 (x,y)**：
+                // 中间那一列该是 x=0 的竖直线（关于中心对称），两边该是围一圈。
+                // 同时把每把挂载的 (x,y) 打进日志，和截图逐把对照。
+                installFrameCounter();
+                installCameraLock();
+                keepDialogsHidden();
+                Timer.schedule(Driver::setupMidScene, 5f);
+                Timer.schedule(Driver::midMerge, 10f);
+                Timer.schedule(Driver::midDump, 16f);
+                Timer.schedule(() -> Vars.renderer.setScale(2f), 17f);
+                Timer.schedule(() -> shot("mid_layout_far"), 19f);
+                Timer.schedule(() -> Vars.renderer.setScale(4f), 21f);
+                Timer.schedule(() -> shot("mid_layout_near"), 23f);
+                Timer.schedule(Driver::midDump, 25f);
+                Timer.schedule(() -> { Log.info("[drv] mid 模式结束 frames=@", frames); Core.app.exit(); }, 30f);
             }else{
-                Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega|hover|icon）", mode);
+                Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega|hover|icon|mid）", mode);
                 Core.app.exit();
             }
         });
@@ -1106,6 +1124,95 @@ public class Driver extends Mod{
             }
             Log.info("[drv] icon 场上有 @ 只巨兽", beasts);
         }catch(Throwable t){ Log.err("[drv] iconReport failed", t); }
+    }
+
+    // ---------------- mid（用户编组 3 toxopid + 3 pulsar + elude 的武器落位） ----------------
+    static Unit midBeast;
+    static int midOx = -1, midOy = -1;
+
+    static void setupMidScene(){
+        try{
+            hideDialogs();
+            var map = Vars.maps.all().find(m -> m.name().contains("Archipelago"));
+            Vars.world.loadMap(map, map.applyRules(Gamemode.survival));
+            Vars.state.rules.canGameOver = false;
+            Vars.state.rules.waves = false;
+            Vars.state.rules.fog = false;
+            Vars.state.rules.staticFog = false;
+            Vars.logic.play();
+            if(Vars.state.isPaused()) Vars.state.set(mindustry.core.GameState.State.playing);
+            for(int y=40;y<130;y++) for(int x=30;x<200;x++){ Tile t=Vars.world.tile(x,y); if(t!=null && t.block()!=Blocks.air) t.setBlock(Blocks.air); }
+            int ox = -1, oy = -1;
+            outer:
+            for(int y=50;y<120;y++){
+                for(int x=40;x<190;x++){
+                    boolean ok = true;
+                    for(int dy=-4;dy<=4 && ok;dy++) for(int dx=-5;dx<=5;dx++){
+                        Tile t = Vars.world.tile(x+dx, y+dy);
+                        if(t == null || t.floor() == null || t.floor().isLiquid || t.block() != Blocks.air){ ok = false; break; }
+                    }
+                    if(ok){ ox = x; oy = y; break outer; }
+                }
+            }
+            if(ox < 0){ Log.err("[drv] mid 没找到陆地"); return; }
+            Building core = placeBL(Blocks.coreShard, ox + 20, oy + 12);
+            if(core != null && core.items != null) for(Item it : Vars.content.items()) core.items.set(it, 5000);
+            midOx = ox; midOy = oy;
+            Core.camera.position.set(ox * 8f, oy * 8f);
+        }catch(Throwable t){ Log.err("[drv] setupMidScene failed", t); }
+    }
+
+    static void midMerge(){
+        try{
+            float cx = midOx * 8f, cy = midOy * 8f;
+            Seq<Unit> us = new Seq<>();
+            UnitType[] comp = {UnitTypes.toxopid, UnitTypes.toxopid, UnitTypes.toxopid,
+                               UnitTypes.pulsar, UnitTypes.pulsar, UnitTypes.pulsar, UnitTypes.elude};
+            for(int i = 0; i < comp.length; i++){
+                Unit u = comp[i].create(Team.sharded);
+                u.set(cx + (i - 3) * 26f, cy + (i % 2 == 0 ? -30f : 30f));
+                u.add();
+                us.add(u);
+            }
+            run(2);
+            Object mega = combineCall("combineunit.units.UnitComboMerge", "mergeSelected", new Class<?>[]{Seq.class}, us);
+            if(mega instanceof Unit mu){
+                mu.set(cx, cy);
+                midBeast = mu;
+                camTarget = mu;
+                // 钉住姿态：rotation=90（屏幕上方 = 单位正前方），每帧把全部枪口钉在 90°、速度清零。
+                // 这样截图里"枪管画在哪儿"就直接等于该挂载的 (x,y)，能和日志逐把对上。
+                var t = new arc.scene.ui.layout.Table();
+                t.touchable = arc.scene.event.Touchable.disabled;
+                t.update(() -> {
+                    if(midBeast == null || !midBeast.isAdded()) return;
+                    midBeast.rotation(90f);
+                    midBeast.vel().setZero();
+                    for(var m : midBeast.mounts()) m.rotation = 90f;
+                });
+                Vars.ui.hudGroup.addChild(t);
+            }else{
+                Log.err("[drv] mid: 融合失败（返回 @）", mega);
+            }
+        }catch(Throwable t){ Log.err("[drv] midMerge failed", t); }
+    }
+
+    static void midDump(){
+        try{
+            if(midBeast == null){ Log.err("[drv] mid: 没有巨兽"); return; }
+            var mounts = midBeast.mounts();
+            StringBuilder sb = new StringBuilder();
+            int midN = 0;
+            float sumY = 0f;
+            for(int i = 0; i < mounts.length; i++){
+                mindustry.type.Weapon w = mounts[i].weapon;
+                sb.append("\n      [").append(i).append("] ").append(w.name)
+                  .append(" x=").append(String.format("%.1f", w.x)).append(" y=").append(String.format("%.1f", w.y));
+                if(Math.abs(w.x) < 0.01f){ midN++; sumY += w.y; }
+            }
+            Log.info("[drv] mid 巨兽 mounts=@ hitSize=@ rotation=@ x=0 的武器=@ 把（y 之和=@）:@",
+                mounts.length, midBeast.hitSize(), midBeast.rotation(), midN, String.format("%.2f", sumY), sb);
+        }catch(Throwable t){ Log.err("[drv] midDump failed", t); }
     }
 
     static void shot(String name){
