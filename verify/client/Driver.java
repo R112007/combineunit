@@ -184,8 +184,32 @@ public class Driver extends Mod{
                 Timer.schedule(() -> shot("tank_mega"), 22f);
                 Timer.schedule(Driver::tankReport, 24f);
                 Timer.schedule(() -> { Log.info("[drv] tank 模式结束 frames=@", frames); Core.app.exit(); }, 30f);
+            }else if(mode.equals("sf")){
+                // 用户报："电脑端合体 3 个饱和火力模组的单位神渎后，在玩家控制时无法攻击"。
+                // 这个模式把 3 只神渎（饱和火力 mod）合体、接管控制，然后**照抄 DesktopInput.updateMovement
+                // 的尾巴**（aim + controlWeapons(true, player.shooting && !boosted)）来模拟"玩家按住开火"，
+                // 同时把输入侧/武器侧的状态全打进日志（player.shooting / canShoot / isFlying / mount.shoot…）。
+                installFrameCounter();
+                installCameraLock();
+                keepDialogsHidden();
+                Timer.schedule(Driver::setupMidScene, 5f);
+                Timer.schedule(Driver::sfMerge, 10f);
+                Timer.schedule(Driver::sfTakeControl, 14f);
+                // 阶段 1：自己照抄输入尾巴（aim + controlWeapons）——证明武器系统本身能开火
+                Timer.schedule(Driver::sfLoop, 16f, 0.05f, 800);
+                Timer.schedule(Driver::sfReport, 18f);
+                Timer.schedule(() -> Vars.renderer.setScale(2f), 20f);
+                Timer.schedule(() -> shot("sf_fire"), 24f);
+                Timer.schedule(Driver::sfReport, 26f);
+                Timer.schedule(Driver::sfReportWeapons, 28f);
+                // 阶段 2：**只按住开火键**，瞄准/转向/开火全交给游戏自己的桌面输入处理
+                Timer.schedule(() -> { sfPhase = 2; Log.info("[drv] sf: 切到阶段 2（只按住开火，交给原版 DesktopInput）"); }, 30f);
+                Timer.schedule(Driver::sfReportWeapons, 42f);
+                Timer.schedule(() -> shot("sf_hold"), 44f);
+                Timer.schedule(Driver::sfReport, 46f);
+                Timer.schedule(() -> { Log.info("[drv] sf 模式结束 frames=@", frames); Core.app.exit(); }, 52f);
             }else{
-                Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega|hover|icon|mid|tank）", mode);
+                Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega|hover|icon|mid|tank|sf）", mode);
                 Core.app.exit();
             }
         });
@@ -910,6 +934,18 @@ public class Driver extends Mod{
         }catch(Throwable ignored){}
     }
 
+    static int sfPhase = 1;
+
+    /** 阶段 1 = 自己模拟输入尾巴；阶段 2 = 只按住开火，其余交给原版 DesktopInput。 */
+    static void sfLoop(){
+        if(sfBeast == null || !sfBeast.isAdded()) return;
+        if(sfPhase == 1){
+            sfFireLoop();
+        }else{
+            Vars.player.shooting = true;
+        }
+    }
+
     /**
      * 场景阶段**每秒**清一次弹窗。
      * 客户端的"检查更新"弹窗是启动后隔几秒才弹出来的（软渲染下时机不固定），
@@ -1268,6 +1304,105 @@ public class Driver extends Mod{
             tankBeast.vel().set(0f, 0.6f);
             if(tankRef != null && tankRef.isAdded()) tankRef.rotation(90f);
         }catch(Throwable t){ Log.err("[drv] tankDrive failed", t); }
+    }
+
+    // ---------------- sf（饱和火力 mod 的神渎：玩家控制能不能开火） ----------------
+    static Unit sfBeast;
+    static UnitType sfType;
+    static long sfShots0 = -1;
+    static Object sfInput;   // Vars.control.input（InputHandler），用来问 canShoot()
+
+    static UnitType findByName(String part){
+        for(UnitType t : Vars.content.units()) if(t.name.contains(part)) return t;
+        return null;
+    }
+
+    static void sfMerge(){
+        try{
+            sfType = findByName("神渎");
+            if(sfType == null){
+                Log.err("[drv] sf: 内容里找不到神渎单位（装了饱和火力吗？）");
+                for(UnitType t : Vars.content.units()) if(t.name.contains("饱和")) Log.info("[drv]   候选 @", t.name);
+                return;
+            }
+            sfInput = field(Vars.control, "input");
+            float cx = midOx * 8f, cy = midOy * 8f;
+            Seq<Unit> us = new Seq<>();
+            for(int i = 0; i < 3; i++){
+                Unit u = sfType.create(Team.sharded);
+                u.set(cx - 200f + i * 200f, cy);
+                u.add();
+                us.add(u);
+            }
+            run(2);
+            Object mega = combineCall("combineunit.units.UnitComboMerge", "mergeSelected", new Class<?>[]{Seq.class}, us);
+            if(mega instanceof Unit mu){
+                mu.set(cx, cy);
+                mu.rotation(90f);
+                sfBeast = mu;
+                camTarget = mu;
+                Log.info("[drv] sf: 神渎=@ hitSize=@ 融合后 mounts=@ type=@",
+                    sfType.name, sfType.hitSize, mu.mounts().length, mu.type.name);
+            }else{
+                Log.err("[drv] sf: 融合失败（返回 @）", mega);
+            }
+        }catch(Throwable t){ Log.err("[drv] sfMerge failed", t); }
+    }
+
+    static void sfTakeControl(){
+        try{
+            if(sfBeast == null) return;
+            Vars.player.unit(sfBeast);
+            Log.info("[drv] sf: 玩家单位=@（== 巨兽? @）", Vars.player.unit() == null ? "null" : Vars.player.unit().type.name,
+                Vars.player.unit() == sfBeast);
+            sfShots0 = totalShots(sfBeast);
+        }catch(Throwable t){ Log.err("[drv] sfTakeControl failed", t); }
+    }
+
+    /** 每帧照抄 DesktopInput.updateMovement 的尾巴：模拟"玩家按着开火键"。 */
+    static void sfFireLoop(){
+        try{
+            if(sfBeast == null || !sfBeast.isAdded()) return;
+            boolean mech = sfBeast instanceof mindustry.gen.Mechc;
+            boolean boosted = mech && sfBeast.isFlying();
+            Vars.player.shooting = true;                       // 相当于鼠标按住
+            sfBeast.aim(sfBeast.x, sfBeast.y + 400f, true);
+            sfBeast.controlWeapons(true, Vars.player.shooting && !boosted);
+        }catch(Throwable t){ Log.err("[drv] sfFireLoop failed", t); }
+    }
+
+    static long totalShots(Unit u){
+        long n = 0;
+        for(var m : u.mounts()) n += m.totalShots;
+        return n;
+    }
+
+    static void sfReport(){
+        try{
+            if(sfBeast == null){ Log.err("[drv] sf: 没有巨兽"); return; }
+            boolean canShoot = true;
+            try{
+                canShoot = (Boolean)sfInput.getClass().getMethod("canShoot").invoke(sfInput);
+            }catch(Throwable ignored){ }
+            Log.info("[drv] sf 状态: player.shooting=@ input.canShoot()=@ isFlying=@ elevation=@ Mechc=@ canBoost=@"
+                + " omniMovement=@ faceTarget=@ hasWeapons=@ type.weapons=@ 开火总数=@",
+                Vars.player.shooting, canShoot, sfBeast.isFlying(), sfBeast.elevation(), sfBeast instanceof mindustry.gen.Mechc,
+                sfBeast.type.canBoost, sfBeast.type.omniMovement, sfBeast.type.faceTarget, sfBeast.hasWeapons(),
+                sfBeast.type.weapons.size, totalShots(sfBeast) - Math.max(sfShots0, 0));
+        }catch(Throwable t){ Log.err("[drv] sfReport failed", t); }
+    }
+
+    static void sfReportWeapons(){
+        try{
+            if(sfBeast == null) return;
+            int i = 0;
+            for(var m : sfBeast.mounts()){
+                Log.info("[drv]   mount[@] @ x=@ y=@ controllable=@ shoot=@ rotate=@ warmup=@ reload=@ totalShots=@",
+                    i, m.weapon.name, m.weapon.x, m.weapon.y, m.weapon.controllable, m.shoot, m.rotate,
+                    m.warmup, m.reload, m.totalShots);
+                i++;
+            }
+        }catch(Throwable t){ Log.err("[drv] sfReportWeapons failed", t); }
     }
 
     static void tankReport(){
