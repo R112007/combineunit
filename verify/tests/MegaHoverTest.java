@@ -212,65 +212,43 @@ public class MegaHoverTest implements ApplicationListener{
     }
 
     /**
-     * 【围一圈 + 左右不串】用户要求：武器仍然围着本体一圈，但"原来在左边的在圆的左边、
-     * 原来在右边的在圆的右边"。可观测的不变量：
-     *   ①每把武器都落在圆环上（到本体中心距离 ≈ hitSize*0.55，误差 < 8%）；
-     *   ②镜像搭档（otherSide 互相指向，原版就是 x 取反的一对）必须落在圆的**两侧**
-     *     （横向坐标反号）—— 修前它们被摊成"右/前"（一个 x>0、一个 x≈0），这条会挂；
-     *   ③没有两把武器重叠在同一个槽位。
+     * 【三列布局（用户新要求）】武器位置按：
+     *   · x≈0 → 中间列（x=0）；· 镜像对 → 左右对称（±colX，同一行）；
+     *   · mirror=false 且 x>0 → 右列（+colX）；x<0 → 左列（−colX）。
+     * 这里只做"布局自洽"检查（每把武器落在 {0, ±colX} 之一、镜像搭档分居两侧、无重叠）——
+     * 完整的分类/镜像/射程断言在 {@code MegaWeaponLayoutTest} 里。
      */
-    /** 采样 cellColor 的亮度，返回脉冲幅度（max-min）。低血量时原版 cell 会闪，幅度应明显 > 0。 */
-    static float cellFlashAmp(UnitType dom, Unit u, int ticks){
-        float min = 9f, max = -9f;
-        for(int i = 0; i < ticks; i++){
-            arc.graphics.Color c = dom.cellColor(u);
-            float b = (c.r + c.g + c.b) / 3f;
-            min = Math.min(min, b); max = Math.max(max, b);
-            run(1);
-        }
-        return max - min;
-    }
-
     static void weaponRingReport(String tag, Unit u, Weapon[] origOf){
         if(u == null || u.mounts() == null) return;
         WeaponMount[] ms = u.mounts();
         if(ms.length == 0) return;
-        float rad = u.hitSize() * 0.55f;
-        int mirror = 0, mirrorOpposite = 0, onRing = 0, overlaps = 0, sideKept = 0, sideTotal = 0;
+        float colX = Math.max(u.hitSize() * 0.55f, 6f);
+        int onColumn = 0, mirror = 0, mirrorOpposite = 0, overlaps = 0;
         StringBuilder sb = new StringBuilder();
         for(int i = 0; i < ms.length; i++){
             Weapon wi = ms[i].weapon;
-            float len = arc.math.Mathf.len(wi.x, wi.y);
-            if(Math.abs(len - rad) <= Math.max(rad * 0.08f, 1.5f)) onRing++;
+            boolean mid = Math.abs(wi.x) < 0.01f;
+            boolean side = Math.abs(Math.abs(wi.x) - colX) <= Math.max(colX * 0.25f, 2f);
+            if(mid || side) onColumn++;
             for(int j = i + 1; j < ms.length; j++){
                 Weapon wj = ms[j].weapon;
-                if(arc.math.Mathf.dst(wi.x, wi.y, wj.x, wj.y) < Math.max(rad * 0.2f, 1.5f)) overlaps++;
+                if(arc.math.Mathf.dst(wi.x, wi.y, wj.x, wj.y) < Math.max(colX * 0.2f, 1.5f)) overlaps++;
             }
             if(wi.otherSide < 0 || wi.otherSide >= ms.length) continue;
             mirror++;
             Weapon wo = ms[wi.otherSide].weapon;
-            boolean sideOk = (wi.x > 0.001f && wo.x < -0.001f) || (wi.x < -0.001f && wo.x > 0.001f);
-            if(sideOk) mirrorOpposite++;
-            if(origOf != null){
-                Weapon ow = origOf[i % origOf.length];
-                if(Math.abs(ow.x) > 0.5f){
-                    sideTotal++;
-                    if(Math.signum(wi.x) == Math.signum(ow.x)) sideKept++;
-                }
-                sb.append(" [原 (").append((int)ow.x).append(",").append((int)ow.y).append(")");
-            } else sb.append(" [原 -");
+            if((wi.x > 0.001f && wo.x < -0.001f) || (wi.x < -0.001f && wo.x > 0.001f)) mirrorOpposite++;
             sb.append("\n      [").append(i).append("] x=").append((int)wi.x).append(",y=").append((int)wi.y)
-              .append(" ↔ [").append(wi.otherSide).append("] x=").append((int)wo.x).append(",y=").append((int)wo.y)
-              .append(" 左右分居=").append(sideOk);
+              .append(" ↔ [").append(wi.otherSide).append("] x=").append((int)wo.x).append(",y=").append((int)wo.y);
         }
-        System.out.println("[MH] " + tag + " 武器圆: 在圆环上 " + onRing + "/" + ms.length
-            + "、镜像搭档分居两侧 " + mirrorOpposite + "/" + mirror + "、左右不串 " + sideKept + "/" + sideTotal
-            + "、重叠 " + overlaps + "；圆半径=" + (int)rad + sb);
-        if(sideTotal > 0) check("原来在左/右的武器合体后仍在圆的同一侧（" + sideKept + "/" + sideTotal + "）", sideKept == sideTotal);
-        if(mirror > 0) check("镜像武器对在圆上左右分居（" + mirrorOpposite + "/" + mirror + "）", mirrorOpposite == mirror);
-        check("武器没有重叠在同一槽位（重叠 " + overlaps + "）", overlaps == 0);
+        System.out.println("[MH] " + tag + " 武器位置: 落在中间/左右列 " + onColumn + "/" + ms.length
+            + "、镜像搭档分居两侧 " + mirrorOpposite + "/" + mirror + "、重叠 " + overlaps + "（colX=" + (int)colX + "）" + sb);
+        // 三列布局只对**巨兽**成立（单个原版单位保持它自己的武器偏移）
         if(u.getClass().getName().equals("combineunit.units.mega.MegaUnitEntity"))
-            check("所有武器都在武器圆上（" + onRing + "/" + ms.length + "）", onRing == ms.length);
+            check("每把武器都在三列布局上（中间列 x=0 或左右列 ±colX，" + onColumn + "/" + ms.length + "）",
+                onColumn == ms.length);
+        if(mirror > 0) check("镜像武器对左右对称（" + mirrorOpposite + "/" + mirror + "）", mirrorOpposite == mirror);
+        check("武器没有重叠在同一位置（重叠 " + overlaps + "）", overlaps == 0);
     }
 
     /**
@@ -280,6 +258,12 @@ public class MegaHoverTest implements ApplicationListener{
      * 满血应该几乎不变，低血量应该有明显波动（≥ 0.05）。
      */
     static void cellFlashReport(String tag, UnitType dom, Unit u, int ticks){
+        System.out.println("[MH] " + tag + " cell 脉冲幅度=" + String.format("%.3f", cellFlashAmp(dom, u, ticks))
+            + "（血量 " + (int)(u.healthf() * 100) + "%）");
+    }
+
+    /** 采样 cellColor 的亮度，返回脉冲幅度（max-min）：低血量时原版 cell 会闪，幅度应明显 > 0。 */
+    static float cellFlashAmp(UnitType dom, Unit u, int ticks){
         float min = 9f, max = -9f;
         for(int i = 0; i < ticks; i++){
             arc.graphics.Color c = dom.cellColor(u);
@@ -287,10 +271,7 @@ public class MegaHoverTest implements ApplicationListener{
             min = Math.min(min, b); max = Math.max(max, b);
             run(1);
         }
-        System.out.println("[MH] " + tag + " cell 亮度: " + String.format("%.3f", min) + " ~ "
-            + String.format("%.3f", max) + "（脉冲幅度 " + String.format("%.3f", max - min) + "，血量 "
-            + (int)(u.healthf() * 100) + "%）");
-        return; // 判定在调用处统一做
+        return max - min;
     }
 
     @Override public void init(){

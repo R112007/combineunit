@@ -432,43 +432,13 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
 
         int n = ws.size;
         float rad = hitSize() * 0.55f;
-        // 【武器围成一圈，但"左右不能串"】用户要求：保留"围着本体一圈"的排布，
-        // 但**原来在左边的武器要落在武器圆的左边、原来在右边的落在右边**。
-        // 原版武器 (x, y) 是"横向 / 纵向"偏移，镜像武器对（`otherSide`）就是 x 反号的一对
-        // （elude：x=±4, y=-2，方向角 -26.6° / -153.4°）。
-        //   · 以前按序号 i 摊到圆环上（ang = i*360/n）：2 只 elude 的 4 把武器落在
-        //     0°/90°/180°/270°，镜像搭档被拆成"右 + 前"（用户报的"左右对称的武器合体后
-        //     变成前后的位置了"，表现就是"极其不精准的炮"）。
-        //   · 也不能像"整组平移"那样只把两把往外挪：那样武器不围圈了。
-        // 现在：**把每个成员的武器当作一个整体刚性旋转**（旋转角 a 一律 < 90°），再落到圆环上 ——
-        //   每个成员一个锚点角，多个成员之间把小角度均匀铺开（span = 180*(M-1)/M），
-        //   于是：①每把武器都在圆环上（围一圈）；②成员内部左右/前后的相对关系不变
-        //   （旋转 <90° 时 x 的符号不会翻，镜像搭档仍然一左一右）；③不同成员的武器不会重叠。
-        if(n > 0){
-            int groupsN = Math.max(groups.size, 1);
-            float span = 180f * Math.max(groupsN - 1, 0) / groupsN;
-            for(int g = 0; g < groups.size; g++){
-                float a = groupsN <= 1 ? 0f : ((g / (float)(groupsN - 1)) - 0.5f) * span;
-                for(Weapon w : groups.get(g)){
-                    float len = Mathf.len(w.x, w.y);
-                    // 注意：arc 的 Mathf.atan2 参数序是 (x, y) 而且返回**弧度**；
-                    // 这里要的是"度"，直接用标准库算，别踩这个坑。
-                    float ang = (len < 0.001f ? 0f : (float)Math.toDegrees(Math.atan2(w.y, w.x))) + a;
-                    w.x = Mathf.cosDeg(ang) * rad;
-                    w.y = Mathf.sinDeg(ang) * rad;
-                }
-            }
-            // 兜底：万一有个成员一把武器都没有（groups 为空），把它按老办法摊开，
-            // 至少保证武器都在圆上、不重叠。
-            if(groups.isEmpty()){
-                for(int i = 0; i < n; i++){
-                    Weapon w = ws.get(i);
-                    float ang = i * 360f / n;
-                    w.x = Mathf.cosDeg(ang) * rad;
-                    w.y = Mathf.sinDeg(ang) * rad;
-                }
-            }
-        }
+        // 【武器位置：三列布局】用户要求：
+        //   · x≈0（正中）→ 放**中间一列**；
+        //   · mirror=true 的镜像对 → **左右对称**（同一行的左右两把）；
+        //   · mirror=false 且 x>0 → **右列**；mirror=false 且 x<0 → **左列**。
+        // 原版武器 (x, y)：x 是横向偏移、y 是纵向偏移；镜像对就是 x 反号、由 otherSide 互相记挂的一对
+        //（elude：x=±4）。分类必须看**改位置之前**的 x/y，所以先记下来再统一落位。
+        layoutWeapons(ws);
         WeaponMount[] arr = new WeaponMount[n];
         for(int i = 0; i < n; i++){
             arr[i] = ws.get(i).mountType.get(ws.get(i));
@@ -481,14 +451,105 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         builtAbilities = abilities();
         mountSig = compositionSig();
 
-        // 索敌半径 = 本体半径 + 武器环半径 + 最远武器射程
-        float mr = hitSize() * 1.55f;
+        // 【射程重算】从本体中心算的**最大有效射程** = 弹体自身射程 bullet.range
+        // + 枪口到本体中心的距离（武器现在摆在 ±colX 的左右列 / 中间列上，离中心越远够得越远）。
+        // 以前这里是混合口径（类型上写死 260f、索敌半径又用 bullet.range + 环半径 + hitSize），
+        // 而成员武器射程从 60 到 500 都有 —— 写死明显不对。
+        // 这个值同时喂给：MegaUnitEntity.range()（原版 AI 索敌）与派生类型的 range/maxRange
+        //（原版 initWeapons 就是按武器算这两个字段；巨兽类型 late 注册、init 从不执行）。
+        float mr = Math.max(hitSize() * 1.55f, 40f);
         for(int i = 0; i < n; i++){
             Weapon w = ws.get(i);
-            if(w.bullet != null) mr = Math.max(mr, w.bullet.range + rad + hitSize());
+            if(w.bullet == null) continue;
+            mr = Math.max(mr, w.bullet.range + Mathf.len(w.x, w.y));
         }
         megaRange = mr;
+        // 派生类型也要跟着更新（原版 initWeapons 就是按武器算这两个字段；巨兽类型 late 注册、
+        // init 从不执行，以前写死 260f —— 面板/AI 读的是类型上的值）。
+        if(type instanceof MegaUnitType mt){
+            mt.range = mr;
+            mt.maxRange = mr;
+        }
     }
+
+    /**
+     * 三列摆武器（用户要求，见 {@link #refreshDerived} 里调用处的说明）：
+     * <ul>
+     *     <li>x≈0（|x| &lt; 0.5）→ 中间一列（x=0）；</li>
+     *     <li>镜像对（`otherSide` 互指，即原版 mirror=true 展开出来的那对）→ 左右对称：±colX、同一行；</li>
+     *     <li>mirror=false 且 x&gt;0 → 右列（+colX）；x&lt;0 → 左列（−colX）。</li>
+     * </ul>
+     * 同一列里的多把武器按**原本的 y**（前后顺序）均匀排开，避免挤在一点上。
+     */
+    private void layoutWeapons(Seq<Weapon> ws){
+        int n = ws.size;
+        if(n <= 0) return;
+        float colX = Math.max(hitSize() * 0.55f, 6f);    // 左右列离中轴的横向距离
+        float rowGap = Math.max(hitSize() * 0.5f, 5f);   // 同列内武器沿纵向的间距
+        float[] ox = new float[n], oy = new float[n];
+        for(int i = 0; i < n; i++){
+            Weapon w = ws.get(i);
+            ox[i] = w.x;
+            oy[i] = w.y;
+        }
+        Seq<Integer> pairIdx = new Seq<>(), midIdx = new Seq<>(), leftIdx = new Seq<>(), rightIdx = new Seq<>();
+        for(int i = 0; i < n; i++){
+            Weapon w = ws.get(i);
+            int os = w.otherSide;
+            if(os >= 0 && os < n && os != i){
+                // 镜像对：只按"x 大的那把"登记一次（另一把在落位时对称摆过去）
+                if(ox[i] >= ox[os]) pairIdx.add(i);
+                continue;
+            }
+            if(Math.abs(ox[i]) < 0.5f) midIdx.add(i);
+            else if(ox[i] > 0f) rightIdx.add(i);
+            else leftIdx.add(i);
+        }
+        sortIdxByY(pairIdx, oy);
+        sortIdxByY(midIdx, oy);
+        sortIdxByY(leftIdx, oy);
+        sortIdxByY(rightIdx, oy);
+        // 镜像对：左右对称
+        for(int k = 0; k < pairIdx.size; k++){
+            float y = (k - (pairIdx.size - 1) / 2f) * rowGap;
+            Weapon w = ws.get(pairIdx.get(k));
+            w.x = colX;
+            w.y = y;
+            int os = w.otherSide;
+            if(os >= 0 && os < n){
+                Weapon other = ws.get(os);
+                other.x = -colX;
+                other.y = y;
+            }
+        }
+        placeColumn(ws, midIdx, 0f, rowGap);
+        placeColumn(ws, leftIdx, -colX, rowGap);
+        placeColumn(ws, rightIdx, colX, rowGap);
+    }
+
+    /** 一列单侧武器落位：整列沿纵向居中排开。 */
+    private static void placeColumn(Seq<Weapon> ws, Seq<Integer> idx, float colX, float rowGap){
+        for(int k = 0; k < idx.size; k++){
+            Weapon w = ws.get(idx.get(k));
+            w.x = colX;
+            w.y = (k - (idx.size - 1) / 2f) * rowGap;
+        }
+    }
+
+    /** 按"原本的 y"给索引排序（插入排序，数量很小）：同列武器保持原来的前后关系。 */
+    private static void sortIdxByY(Seq<Integer> idx, float[] oy){
+        for(int i = 1; i < idx.size; i++){
+            int key = idx.get(i);
+            float kv = oy[key];
+            int j = i - 1;
+            while(j >= 0 && oy[idx.get(j)] > kv){
+                idx.set(j + 1, idx.get(j));
+                j--;
+            }
+            idx.set(j + 1, key);
+        }
+    }
+
 
     /**
      * 原版 setType 发现 mounts 长度和 type.weapons 不一致就会调 setupWeapons 按
@@ -773,6 +834,8 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             if(t.canBoost) ct.canBoost = true;
             if(t.canHeal) ct.canHeal = true;
         }
+        // range/maxRange 这里只给个兜底：真正的值在 rebuildMounts()（非静态、能读实例状态）
+        // 里按"实测武器射程 + 枪口到中心距离"算好覆盖（compTypeFor 是静态方法，读不到实例字段）。
         ct.range = 260f;
         ct.maxRange = 260f;
 
