@@ -432,12 +432,13 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
 
         int n = ws.size;
         float rad = hitSize() * 0.55f;
-        // 【武器位置：三列布局】用户要求：
-        //   · x≈0（正中）→ 放**中间一列**；
-        //   · mirror=true 的镜像对 → **左右对称**（同一行的左右两把）；
-        //   · mirror=false 且 x>0 → **右列**；mirror=false 且 x<0 → **左列**。
-        // 原版武器 (x, y)：x 是横向偏移、y 是纵向偏移；镜像对就是 x 反号、由 otherSide 互相记挂的一对
-        //（elude：x=±4）。分类必须看**改位置之前**的 x/y，所以先记下来再统一落位。
+        // 【武器位置】用户要求（两版合一）：
+        //   · 中间那列（x≈0）→ **一条直线**（x=0，按原本前后顺序等距）；
+        //   · 两边（镜像对 + 只有一边的武器）→ **围成一个圆**（落在半径 rad 的圆弧上，各占自己那半边）；
+        //   · 镜像对（mirror=true，原版展开成 x 反号的一对、由 otherSide 互指）→ 严格左右对称；
+        //   · mirror=false 且 x>0 → 圆圈的右半边；x<0 → 左半边。
+        // 原版武器 (x, y)：x 是横向偏移、y 是纵向偏移。分类必须看**改位置之前**的 x/y
+        //（先记下来再统一落位，否则改完第一把就分不清了）。
         layoutWeapons(ws);
         WeaponMount[] arr = new WeaponMount[n];
         for(int i = 0; i < n; i++){
@@ -473,67 +474,90 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
     }
 
     /**
-     * 三列摆武器（用户要求，见 {@link #refreshDerived} 里调用处的说明）：
+     * 摆武器（用户要求，见 {@link #refreshDerived} 里调用处的说明）：
      * <ul>
-     *     <li>x≈0（|x| &lt; 0.5）→ 中间一列（x=0）；</li>
-     *     <li>镜像对（`otherSide` 互指，即原版 mirror=true 展开出来的那对）→ 左右对称：±colX、同一行；</li>
-     *     <li>mirror=false 且 x&gt;0 → 右列（+colX）；x&lt;0 → 左列（−colX）。</li>
+     *     <li><b>中间那列是一条直线</b>：x≈0（|x| &lt; 0.5）的武器排成 x=0 的竖线，按原本的前后顺序等距；</li>
+     *     <li><b>两边围成一个圆</b>：镜像对（`otherSide` 互指，原版 mirror=true 展开出来的那对）
+     *         与"只有一边"的武器都落在半径 rad 的**圆弧**上，各自待在自己那一侧；</li>
+     *     <li>镜像对严格左右对称（x 取反、y 相同），即圆弧上同一个角度的镜像点。</li>
      * </ul>
-     * 同一列里的多把武器按**原本的 y**（前后顺序）均匀排开，避免挤在一点上。
+     * 角度约定与原版一致：0° = 正右（+x）、90° = 正前（+y）、180° = 正左（−x）。
      */
     private void layoutWeapons(Seq<Weapon> ws){
         int n = ws.size;
         if(n <= 0) return;
-        float colX = Math.max(hitSize() * 0.55f, 6f);    // 左右列离中轴的横向距离
-        float rowGap = Math.max(hitSize() * 0.5f, 5f);   // 同列内武器沿纵向的间距
+        float rad = Math.max(hitSize() * 0.55f, 6f);      // 两侧"武器圆"的半径
+        float rowGap = Math.max(hitSize() * 0.5f, 5f);    // 中间那条直线的行距
         float[] ox = new float[n], oy = new float[n];
         for(int i = 0; i < n; i++){
             Weapon w = ws.get(i);
             ox[i] = w.x;
             oy[i] = w.y;
         }
-        Seq<Integer> pairIdx = new Seq<>(), midIdx = new Seq<>(), leftIdx = new Seq<>(), rightIdx = new Seq<>();
+        Seq<Integer> pairRight = new Seq<>(), mid = new Seq<>(), right = new Seq<>(), left = new Seq<>();
         for(int i = 0; i < n; i++){
             Weapon w = ws.get(i);
             int os = w.otherSide;
             if(os >= 0 && os < n && os != i){
-                // 镜像对：只按"x 大的那把"登记一次（另一把在落位时对称摆过去）
-                if(ox[i] >= ox[os]) pairIdx.add(i);
+                // 镜像对：只按"x 大的那把"登记一次（搭档在落位时对称摆过去）
+                if(ox[i] >= ox[os]) pairRight.add(i);
                 continue;
             }
-            if(Math.abs(ox[i]) < 0.5f) midIdx.add(i);
-            else if(ox[i] > 0f) rightIdx.add(i);
-            else leftIdx.add(i);
+            if(Math.abs(ox[i]) < 0.5f) mid.add(i);
+            else if(ox[i] > 0f) right.add(i);
+            else left.add(i);
         }
-        sortIdxByY(pairIdx, oy);
-        sortIdxByY(midIdx, oy);
-        sortIdxByY(leftIdx, oy);
-        sortIdxByY(rightIdx, oy);
-        // 镜像对：左右对称
-        for(int k = 0; k < pairIdx.size; k++){
-            float y = (k - (pairIdx.size - 1) / 2f) * rowGap;
-            Weapon w = ws.get(pairIdx.get(k));
-            w.x = colX;
-            w.y = y;
+        sortIdxByY(mid, oy);
+        sortIdxByY(right, oy);
+        sortIdxByY(left, oy);
+        sortIdxByY(pairRight, oy);
+
+        // ---- 中间：一条竖直线（x=0），按原本前后顺序等距排开 ----
+        for(int k = 0; k < mid.size; k++){
+            Weapon w = ws.get(mid.get(k));
+            w.x = 0f;
+            w.y = (k - (mid.size - 1) / 2f) * rowGap;
+        }
+
+        // ---- 两侧：落在圆弧上（各自半边），镜像对严格左右对称 ----
+        float span = 150f;                                  // 每半边可用弧度（度）
+        Seq<Integer> rightItems = new Seq<>();              // 右半边要摆的"项"：镜像对 + 右侧单武器
+        rightItems.addAll(pairRight);
+        rightItems.addAll(right);
+        sortIdxByY(rightItems, oy);
+        Seq<Float> leftUsed = new Seq<>();                  // 记录左半边已被镜像搭档占用的角度（左单武器避让）
+        for(int k = 0; k < rightItems.size; k++){
+            float a = rightItems.size == 1 ? 0f : (-span / 2f + k * span / (rightItems.size - 1));
+            Weapon w = ws.get(rightItems.get(k));
+            w.x = Mathf.cosDeg(a) * rad;
+            w.y = Mathf.sinDeg(a) * rad;
             int os = w.otherSide;
             if(os >= 0 && os < n){
                 Weapon other = ws.get(os);
-                other.x = -colX;
-                other.y = y;
+                other.x = -w.x;
+                other.y = w.y;
+                leftUsed.add(180f - a);
             }
         }
-        placeColumn(ws, midIdx, 0f, rowGap);
-        placeColumn(ws, leftIdx, -colX, rowGap);
-        placeColumn(ws, rightIdx, colX, rowGap);
+        // 只有左边的那种武器：同样在左半边圆弧上，避开镜像搭档已经占掉的角度
+        for(int k = 0; k < left.size; k++){
+            float base = left.size == 1 ? 0f : (-span / 2f + k * span / (left.size - 1));
+            float a = 180f - base;
+            int guard = 0;
+            while(angleTaken(a, leftUsed) && guard++ < 40) a += 10f;
+            Weapon w = ws.get(left.get(k));
+            w.x = Mathf.cosDeg(a) * rad;
+            w.y = Mathf.sinDeg(a) * rad;
+        }
     }
 
-    /** 一列单侧武器落位：整列沿纵向居中排开。 */
-    private static void placeColumn(Seq<Weapon> ws, Seq<Integer> idx, float colX, float rowGap){
-        for(int k = 0; k < idx.size; k++){
-            Weapon w = ws.get(idx.get(k));
-            w.x = colX;
-            w.y = (k - (idx.size - 1) / 2f) * rowGap;
+    /** 这个角度是不是已经被别的武器占了（差 12° 以内算占）。 */
+    private static boolean angleTaken(float a, Seq<Float> used){
+        for(int i = 0; i < used.size; i++){
+            float d = Math.abs(arc.math.Angles.angleDist(a, used.get(i)));
+            if(d < 12f) return true;
         }
+        return false;
     }
 
     /** 按"原本的 y"给索引排序（插入排序，数量很小）：同列武器保持原来的前后关系。 */

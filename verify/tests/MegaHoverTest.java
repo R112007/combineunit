@@ -212,9 +212,8 @@ public class MegaHoverTest implements ApplicationListener{
     }
 
     /**
-     * 【三列布局（用户新要求）】武器位置按：
-     *   · x≈0 → 中间列（x=0）；· 镜像对 → 左右对称（±colX，同一行）；
-     *   · mirror=false 且 x>0 → 右列（+colX）；x<0 → 左列（−colX）。
+     * 【武器位置（用户要求）】中间那列（x≈0）是**一条直线**（x=0）；两侧（镜像对 + 只有一边的武器）
+     * **围成一个圆**（落在半径 colX 的圆弧上，各自的半边）；镜像对严格左右对称（x 反号、y 相同）。
      * 这里只做"布局自洽"检查（每把武器落在 {0, ±colX} 之一、镜像搭档分居两侧、无重叠）——
      * 完整的分类/镜像/射程断言在 {@code MegaWeaponLayoutTest} 里。
      */
@@ -227,8 +226,9 @@ public class MegaHoverTest implements ApplicationListener{
         StringBuilder sb = new StringBuilder();
         for(int i = 0; i < ms.length; i++){
             Weapon wi = ms[i].weapon;
+            // 新布局：中间那列是直线（x=0），两边的武器围成半径 colX 的圆
             boolean mid = Math.abs(wi.x) < 0.01f;
-            boolean side = Math.abs(Math.abs(wi.x) - colX) <= Math.max(colX * 0.25f, 2f);
+            boolean side = Math.abs(arc.math.Mathf.len(wi.x, wi.y) - colX) <= Math.max(colX * 0.15f, 2f);
             if(mid || side) onColumn++;
             for(int j = i + 1; j < ms.length; j++){
                 Weapon wj = ms[j].weapon;
@@ -237,7 +237,8 @@ public class MegaHoverTest implements ApplicationListener{
             if(wi.otherSide < 0 || wi.otherSide >= ms.length) continue;
             mirror++;
             Weapon wo = ms[wi.otherSide].weapon;
-            if((wi.x > 0.001f && wo.x < -0.001f) || (wi.x < -0.001f && wo.x > 0.001f)) mirrorOpposite++;
+            // 镜像对：严格左右对称（x 反号、y 相同）
+            if(Math.signum(wi.x) != Math.signum(wo.x) && Math.abs(wi.y - wo.y) < 0.01f) mirrorOpposite++;
             sb.append("\n      [").append(i).append("] x=").append((int)wi.x).append(",y=").append((int)wi.y)
               .append(" ↔ [").append(wi.otherSide).append("] x=").append((int)wo.x).append(",y=").append((int)wo.y);
         }
@@ -245,7 +246,7 @@ public class MegaHoverTest implements ApplicationListener{
             + "、镜像搭档分居两侧 " + mirrorOpposite + "/" + mirror + "、重叠 " + overlaps + "（colX=" + (int)colX + "）" + sb);
         // 三列布局只对**巨兽**成立（单个原版单位保持它自己的武器偏移）
         if(u.getClass().getName().equals("combineunit.units.mega.MegaUnitEntity"))
-            check("每把武器都在三列布局上（中间列 x=0 或左右列 ±colX，" + onColumn + "/" + ms.length + "）",
+            check("每把武器都在布局上（中间列直线 x=0 或两侧圆弧 |位置|=colX，" + onColumn + "/" + ms.length + "）",
                 onColumn == ms.length);
         if(mirror > 0) check("镜像武器对左右对称（" + mirrorOpposite + "/" + mirror + "）", mirrorOpposite == mirror);
         check("武器没有重叠在同一位置（重叠 " + overlaps + "）", overlaps == 0);

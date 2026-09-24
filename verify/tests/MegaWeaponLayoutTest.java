@@ -142,7 +142,7 @@ public class MegaWeaponLayoutTest implements ApplicationListener{
         if(!(mega instanceof Unit beast)){ check("拼出一只巨兽（前置）", false); }
         else{
             check("拼出一只巨兽（前置）", true);
-            float colX = Math.max(beast.hitSize() * 0.55f, 6f);
+            float rad = Math.max(beast.hitSize() * 0.55f, 6f);
             WeaponMount[] ms = beast.mounts();
             int idx = 0, midOk = 0, midN = 0, rightOk = 0, rightN = 0, leftOk = 0, leftN = 0, pairOk = 0, pairN = 0;
             StringBuilder detail = new StringBuilder();
@@ -152,34 +152,45 @@ public class MegaWeaponLayoutTest implements ApplicationListener{
                     Weapon nw = ms[idx].weapon;
                     float ox0 = ow.x;
                     boolean pair = ow.otherSide >= 0 && nw.otherSide >= 0;
-                    float tol = Math.max(colX * 0.25f, 2f);
+                    float len = arc.math.Mathf.len(nw.x, nw.y);
                     boolean ok;
                     if(pair){
                         Weapon other = ms[nw.otherSide].weapon;
-                        ok = Math.abs(Math.abs(nw.x) - colX) <= tol && Math.abs(Math.abs(other.x) - colX) <= tol
-                            && Math.signum(nw.x) != Math.signum(other.x) && Math.abs(nw.y - other.y) < 0.01f;
+                        // 镜像对：严格左右对称（x 取反、y 相同），且落在圆上
+                        // 注意：遍历到的是"对里任意一把"，所以只要求 x 反号 + y 相同 + 都在圆上
+                        ok = Math.abs(nw.x + other.x) < 0.01f && Math.abs(nw.y - other.y) < 0.01f
+                            && Math.abs(len - rad) <= Math.max(rad * 0.1f, 1.5f)
+                            && Math.signum(nw.x) != Math.signum(other.x)
+                            && Math.abs(nw.x) > 0.01f;
                         pairN++; if(ok) pairOk++;
                     }else if(Math.abs(ox0) < 0.5f){
+                        // 中间列 = 一条直线：x=0
                         ok = Math.abs(nw.x) < 0.01f;
                         midN++; if(ok) midOk++;
-                    }else if(ox0 > 0f){
-                        ok = Math.abs(nw.x - colX) <= tol;
-                        rightN++; if(ok) rightOk++;
                     }else{
-                        ok = Math.abs(nw.x + colX) <= tol;
-                        leftN++; if(ok) leftOk++;
+                        // 两侧 = 围成圆：落在半径 rad 的圆弧上，且在自己那一侧
+                        ok = Math.abs(len - rad) <= Math.max(rad * 0.1f, 1.5f)
+                            && (ox0 > 0f ? nw.x > 0f : nw.x < 0f);
+                        if(ox0 > 0f){ rightN++; if(ok) rightOk++; } else { leftN++; if(ok) leftOk++; }
                     }
                     detail.append("\n      [").append(idx).append("] 原 x=").append((int)ox0).append(" → 新 x=")
-                          .append((int)nw.x).append(",y=").append((int)nw.y).append(pair ? "（镜像对）" : "")
+                          .append((int)nw.x).append(",y=").append((int)nw.y)
+                          .append("（|位置|=").append((int)len).append(pair ? " 镜像对" : "").append("）")
                           .append(ok ? "" : " ✗");
                     idx++;
                 }
             }
-            System.out.println("[MWL] 落位（colX=" + (int)colX + "）:" + detail);
-            if(midN > 0) check("x=0 的武器落在中间一列（x=0）：" + midOk + "/" + midN, midOk == midN);
-            if(rightN > 0) check("mirror=false 且 x>0 落在右列（x=+colX）：" + rightOk + "/" + rightN, rightOk == rightN);
-            if(leftN > 0) check("mirror=false 且 x<0 落在左列（x=-colX）：" + leftOk + "/" + leftN, leftOk == leftN);
-            check("镜像对左右对称（±colX、同一行）：" + pairOk + "/" + pairN, pairN > 0 && pairOk == pairN);
+            System.out.println("[MWL] 落位（半径 rad=" + (int)rad + "）:" + detail);
+            if(midN > 0) check("x=0 的武器在中间一条直线上（x=0）：" + midOk + "/" + midN, midOk == midN);
+            if(rightN > 0) check("x>0 的单侧武器围在圆的右半边（|位置|=rad）：" + rightOk + "/" + rightN, rightOk == rightN);
+            if(leftN > 0) check("x<0 的单侧武器围在圆的左半边（|位置|=rad）：" + leftOk + "/" + leftN, leftOk == leftN);
+            check("镜像对左右严格对称且在圆上：" + pairOk + "/" + pairN, pairN > 0 && pairOk == pairN);
+            // 没有两把武器挤在同一点
+            int overlap = 0;
+            for(int i = 0; i < ms.length; i++)
+                for(int j = i + 1; j < ms.length; j++)
+                    if(arc.math.Mathf.dst(ms[i].weapon.x, ms[i].weapon.y, ms[j].weapon.x, ms[j].weapon.y) < 3f) overlap++;
+            check("武器没有重叠在同一位置（重叠 " + overlap + "）", overlap == 0);
 
             // 射程重算
             float maxBullet = 0f;
