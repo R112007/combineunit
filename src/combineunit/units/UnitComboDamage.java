@@ -59,6 +59,15 @@ public class UnitComboDamage{
     /** 我们见过的**原版**构造器（替换前那一份）：补扫时用来判断"这个构造器是不是新出现的模组构造器"。 */
     private static final arc.struct.ObjectSet<Prov<?>> vanillaProvs = new arc.struct.ObjectSet<>();
 
+    /**
+     * 我们**真的装了镜像**的实体类（= 服务端真的会造出镜像实例的那些类）。
+     *
+     * <p>同步包只带 classId，一个 classId 只有一种字节格式：镜像类在 writeSync/readSync 末尾
+     * 多写一个 comboId（8 字节）。所以 EntityMapping 的替换必须与构造器的替换**逐个类对齐** ——
+     * 只给这里面的类换映射（见 {@link #replaceEntityMapping()}）。
+     */
+    private static final arc.struct.ObjectSet<Class<?>> mirroredClasses = new arc.struct.ObjectSet<>();
+
     /** 在 mod init 时调用：替换全部原版单位实体。 */
     public static void register(){
         initMirrors();
@@ -120,18 +129,14 @@ public class UnitComboDamage{
         Seq<UnitType> types = new Seq<>();
         Seq<Prov<? extends Unit>> ctors = new Seq<>();
         Seq<Class<?>> classes = new Seq<>();
+        /** 核心机（alpha/beta/gamma/evoke/incite/emanate 及任何 coreUnitDock 类型）的实体类。 */
+        arc.struct.ObjectSet<Class<?>> coreClasses = new arc.struct.ObjectSet<>();
 
+        // ①【取样】所有类型都取样一次。必须在"任何构造器被换掉之前"全部取完（见类注释里
+        //     "两阶段替换"的那条：取样会真的执行别的模组的脚本构造器，那时原版构造器必须还在）。
         for(UnitType type : Vars.content.units()){
             Prov<? extends Unit> ctor = type.constructor;
             if(ctor == null) continue;
-            // 【核心机一律不换】alpha/beta/gamma/evoke/incite/emanate（以及任何 coreUnitDock 类型）
-            // 本来就不参与组合（groupable() 里明确排除），换它们的构造器没有任何收益，
-            // 反而会坑到别的模组：实测作弊模组 invincible-cheat-mod-v8 的 JS 单位写的是
-            //   m.constructor = prov(() => extend(UnitTypes.alpha.constructor.get().class, {...}))
-            // 我们把 alpha 的构造器换成镜像类之后，它继承的就是**模组类**，安卓上直接炸
-            //（崩溃日志：Failed resolution of: Lcombineunit/units/entities/CUnitEntityLegacyAlpha）。
-            // 保持核心机是原版类，别的模组（包括这个作弊模组）继承它就一切照旧。
-            if(UnitComboMerge.isCoreUnit(type)) continue;
             // 【取样必须容错】构造器可能是别的模组（JS/Rhino JavaAdapter）写的动态类，get() 会抛；
             // 一个类型取样失败不该拖垮整个模组加载：跳过它（那个单位不做承伤镜像，其余照常）。
             Unit sample;
@@ -145,20 +150,60 @@ public class UnitComboDamage{
             types.add(type);
             ctors.add(ctor);
             classes.add(sample.getClass());
-            vanillaProvs.add(ctor);
+
+            // 【核心机一律不换构造器】alpha/beta/gamma/evoke/incite/emanate（以及任何 coreUnitDock 类型）
+            // 本来就不参与组合（groupable() 里明确排除），换它们的构造器没有任何收益，
+            // 反而会坑到别的模组：实测作弊模组 invincible-cheat-mod-v8 的 JS 单位写的是
+            //   m.constructor = prov(() => extend(UnitTypes.alpha.constructor.get().class, {...}))
+            // 我们把 alpha 的构造器换成镜像类之后，它继承的就是**模组类**，安卓上直接炸
+            //（崩溃日志：Failed resolution of: Lcombineunit/units/entities/CUnitEntityLegacyAlpha）。
+            // 保持核心机是原版类，别的模组（包括这个作弊模组）继承它就一切照旧。
+            if(UnitComboMerge.isCoreUnit(type)){
+                coreClasses.add(sample.getClass());
+            }else{
+                vanillaProvs.add(ctor);
+            }
         }
 
+        // ②【按实体类决定】一个 classId 只能对应一种同步格式，所以"装不装镜像"必须以**类**为单位：
+        //    镜像类的 writeSync/readSync 比原版多 8 字节 comboId，同一个类两端必须一致 ——
+        //    否则服务端按原版格式写、客户端按镜像格式读，整包实体快照在末尾 EOF 被丢掉，
+        //    用户报的"联机时客户端生成不出核心机、一直无法建造"就是这么来的
+        //   （实测客户端日志：CUnitEntityLegacyGamma.readSync → java.io.EOFException）。
+        //    · 只被核心机用的类（alpha/beta/gamma 的 UnitEntityLegacy* 就是这种）→ 不装镜像，
+        //      类与两端格式都保持原版（这是"别的模组继承核心机类"那条安卓兼容修复的钉子：
+        //      JS 模组拿 UnitTypes.alpha.constructor.get().class 当超类时必须拿到游戏类）；
+        //    · 核心机与普通单位**共用**的类（埃里克尔核心机 evoke/incite/emanate 与
+        //      mega/quell/disrupt 共用 mindustry.gen.PayloadUnit）→ 整个类统一装镜像，
+        //      否则要么普通单位不能组合（没有 comboId 字段）、要么两端格式不一致。
+        ObjectMap<Class<?>, Boolean> usedByNormal = new ObjectMap<>();
+        for(int i = 0; i < classes.size; i++){
+            Class<?> c = classes.get(i);
+            if(!UnitComboMerge.isCoreUnit(types.get(i))) usedByNormal.put(c, true);
+        }
+
+        // ③【安装】
         for(int i = 0; i < types.size; i++){
             UnitType type = types.get(i);
             Prov<? extends Unit> ctor = ctors.get(i);
-            Prov<Unit> rep = mirrors.get(classes.get(i));
+            Class<?> cls = classes.get(i);
+            // 只被核心机用的实体类：构造器完全不动（id 映射同样不动，见 replaceEntityMapping）。
+            if(!usedByNormal.get(cls, false)) continue;
+            Prov<Unit> rep = mirrors.get(cls);
             // ① 原版实体类 → 换成镜像（脚本执行期间自动退化成原版实例，见 scriptAware）；
             // ② 别的模组自己的实体类（Rhino 适配器等）→ 原样保留行为，只包一层"脚本构造器"标记，
             //    这样它们在运行期被游戏调用时，内部那句 extend(原版 type.constructor.get().class)
             //    同样能拿到游戏自己的类。
-            Prov<Unit> installed = rep != null ? scriptAware(ctor, rep) : wrapScript(ctor);
+            boolean mirror = rep != null;
+            Prov<Unit> installed = mirror ? scriptAware(ctor, rep) : wrapScript(ctor);
             type.constructor = installed;
             ourProvs.add(installed);
+            if(mirror) mirroredClasses.add(cls);
+        }
+
+        if(coreClasses.size > 0){
+            Log.info("[combineunit] 核心机专用实体类保持原版（构造器与 id 映射都不换）：@ 个类；"
+                + "与普通单位共用的实体类照常装镜像（按类一致）", coreClasses.size);
         }
     }
 
@@ -184,13 +229,21 @@ public class UnitComboDamage{
         }
     }
 
-    /** 替换 EntityMapping 中所有指向原版单位实体的构造器（影响网络同步重建）。 */
+    /**
+     * 替换 EntityMapping 中指向原版单位实体的构造器（影响网络同步重建）。
+     *
+     * <p>【必须与构造器的替换逐个类对齐】只有 {@link #mirroredClasses}（= 真的装了镜像、
+     * 服务端真的会造出镜像实例的类）才换映射。核心机（alpha/beta/gamma/…）没换构造器，
+     * 服务端造出来的是**原版实例**、写出去的是原版字节；这里若还按镜像类读，就会多读 8 字节
+     * comboId → 整包实体快照 EOF 被丢掉（用户报的"客户端生成不出核心机、无法建造"）。
+     */
     @SuppressWarnings("unchecked")
     private static void replaceEntityMapping(){
         // 名称映射：每个名字对应一个构造器，逐个取样判断类别
         EntityMapping.nameMap.each((name, prov) -> {
             Class<?> cls = sampleClass(prov, "实体名 " + name);
             if(cls == null) return;
+            if(!mirroredClasses.contains(cls)) return;
             Prov<Unit> rep = mirrors.get(cls);
             // 同样做成"脚本感知"的：别的模组若拿这里的构造器产出物当超类，脚本执行期间要给原版实例。
             if(rep != null) EntityMapping.nameMap.put(name, scriptAware((Prov<? extends Unit>)prov, rep));
@@ -202,6 +255,7 @@ public class UnitComboDamage{
             if(prov == null) continue;
             Class<?> cls = sampleClass(prov, "实体槽 " + i);
             if(cls == null) continue;
+            if(!mirroredClasses.contains(cls)) continue;
             Prov<Unit> rep = mirrors.get(cls);
             if(rep != null) EntityMapping.idMap[i] = scriptAware((Prov<? extends Unit>)prov, rep);
         }
