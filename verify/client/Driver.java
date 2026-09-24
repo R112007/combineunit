@@ -208,8 +208,22 @@ public class Driver extends Mod{
                 Timer.schedule(() -> shot("sf_hold"), 44f);
                 Timer.schedule(Driver::sfReport, 46f);
                 Timer.schedule(() -> { Log.info("[drv] sf 模式结束 frames=@", frames); Core.app.exit(); }, 52f);
+            }else if(mode.equals("flight")){
+                // 用户设计稿："飞行单位的 hitsize 总和大于地面单位的话就可以飞"。
+                // 并排两个编组：左边 2×dagger + 1×flare（地面为主 → 该贴地），
+                // 右边 2×flare + 1×dagger（空军为主 → 该悬空）。
+                installFrameCounter();
+                installCameraLock();
+                keepDialogsHidden();
+                Timer.schedule(Driver::setupMidScene, 5f);
+                Timer.schedule(Driver::flightScene, 10f);
+                Timer.schedule(Driver::flightReport, 18f);
+                Timer.schedule(() -> Vars.renderer.setScale(2f), 20f);
+                Timer.schedule(() -> shot("flight_rule"), 24f);
+                Timer.schedule(Driver::flightReport, 26f);
+                Timer.schedule(() -> { Log.info("[drv] flight 模式结束 frames=@", frames); Core.app.exit(); }, 32f);
             }else{
-                Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega|hover|icon|mid|tank|sf）", mode);
+                Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega|hover|icon|mid|tank|sf|flight）", mode);
                 Core.app.exit();
             }
         });
@@ -1304,6 +1318,48 @@ public class Driver extends Mod{
             tankBeast.vel().set(0f, 0.6f);
             if(tankRef != null && tankRef.isAdded()) tankRef.rotation(90f);
         }catch(Throwable t){ Log.err("[drv] tankDrive failed", t); }
+    }
+
+    // ---------------- flight（设计稿的"能不能飞"口径：地面为主不飞、空军为主才飞） ----------------
+    static Unit flightGround, flightAir;
+
+    static void flightScene(){
+        try{
+            float cx = midOx * 8f, cy = midOy * 8f;
+            flightGround = combineMerge(cx - 110f, cy + 60f, UnitTypes.dagger, UnitTypes.dagger, UnitTypes.flare);
+            flightAir = combineMerge(cx + 110f, cy - 20f, UnitTypes.flare, UnitTypes.flare, UnitTypes.dagger);
+            // 镜头挂在空军那只上：地面那只在画面左侧、空军那只在中间偏右，两只都能入镜
+            camTarget = flightAir;
+        }catch(Throwable t){ Log.err("[drv] flightScene failed", t); }
+    }
+
+    /** 现场融合一个编组（返回巨兽，失败返回 null）。 */
+    static Unit combineMerge(float x, float y, UnitType... types){
+        try{
+            Seq<Unit> us = new Seq<>();
+            for(int i = 0; i < types.length; i++){
+                Unit u = types[i].create(Team.sharded);
+                u.set(x + i * 24f, y);
+                u.add();
+                us.add(u);
+            }
+            run(2);
+            Object mega = combineCall("combineunit.units.UnitComboMerge", "mergeSelected", new Class<?>[]{Seq.class}, us);
+            if(mega instanceof Unit mu){ mu.set(x, y); return mu; }
+        }catch(Throwable t){ Log.err("[drv] combineMerge failed", t); }
+        return null;
+    }
+
+    static void flightReport(){
+        try{
+            for(var e : new Object[][]{{"地面为主 2×dagger+1×flare", flightGround}, {"空军为主 2×flare+1×dagger", flightAir}}){
+                Unit u = (Unit)e[1];
+                if(u == null){ Log.err("[drv] flight: @ 没有巨兽", e[0]); continue; }
+                Log.info("[drv] flight @: hitSize=@ type.flying=@ elevation=@ isFlying=@ moveMode=@ canShoot=@",
+                    e[0], u.hitSize(), u.type.flying, u.elevation(), u.isFlying(), field(u, "moveMode") != null ? "?" : "?",
+                    u.canShoot());
+            }
+        }catch(Throwable t){ Log.err("[drv] flightReport failed", t); }
     }
 
     // ---------------- sf（饱和火力 mod 的神渎：玩家控制能不能开火） ----------------

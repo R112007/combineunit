@@ -339,7 +339,8 @@ public class UnitComboMerge{
         mega.shield(sumShield);
         // 合体瞬间就把高度定好：有飞行成员的巨兽直接升空（否则头几十 tick 还是"落地"状态，
         // 走地面/水面的碰撞与地形系数，看着像"合体了却不是飞行单位"）
-        mega.elevation(mega.hasFlyer() ? 1f : 0f);
+        // 能不能飞按"飞行成员 hitSize 之和 > 地面成员 hitSize 之和"（用户设计稿），见 canFly()
+        mega.elevation(mega.canFly() ? 1f : 0f);
         mega.add();
 
         Fx.unitDrop.at(mega.x, mega.y);

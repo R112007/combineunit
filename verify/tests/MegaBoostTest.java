@@ -209,15 +209,17 @@ public class MegaBoostTest implements ApplicationListener{
             }
         }
 
-        // ---------- ④ 有飞行成员的巨兽：一直悬空，但能开火（修前：canShoot=false，整只瘫痪） ----------
+        // ---------- ④ 空军为主的巨兽：一直悬空，但能开火（修前：canShoot=false，整只瘫痪） ----------
+        // 注意构成：按设计稿"飞行成员 hitSize 之和 > 地面成员 hitSize 之和"才能飞，所以这里用
+        // 2×flare + 1×dagger（18 > 8）而不是"随便带一架飞机"；地面为主的混编见 MegaFlightRuleTest。
         {
-            Unit mega = mergeAt(ox * 8f + 600f, oy * 8f, UnitTypes.dagger, UnitTypes.dagger, air);
+            Unit mega = mergeAt(ox * 8f + 600f, oy * 8f, air, air, UnitTypes.dagger);
             if(mega == null){ check("带空军成员的巨兽能融合（前置）", false); }
             else{
-                Object hf = field(mega, "hasFlyer");
-                System.out.println("[MB] 空军巨兽: hasFlyer=" + hf + " type.canBoost=" + mega.type.canBoost
+                Object hf = field(mega, "hasFlyer"), cf = field(mega, "canFly");
+                System.out.println("[MB] 空军巨兽: hasFlyer=" + hf + " canFly=" + cf + " type.canBoost=" + mega.type.canBoost
                     + " elevation=" + String.format("%.2f", mega.elevation()) + " isFlying=" + mega.isFlying());
-                check("带空军成员的巨兽固定飞天（isFlying=" + mega.isFlying() + "）", mega.isFlying());
+                check("空军为主的巨兽悬空（Σ飞行hitSize>Σ地面hitSize，isFlying=" + mega.isFlying() + "）", mega.isFlying());
                 check("空军巨兽的 canBoost 也是 false（" + mega.type.canBoost + "）", !mega.type.canBoost);
                 check("空军巨兽在空中 canShoot()=true（修前这里是 false = 整只瘫痪）", mega.canShoot());
                 long s0 = shots(mega);

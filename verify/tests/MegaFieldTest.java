@@ -178,8 +178,10 @@ public class MegaFieldTest implements ApplicationListener{
         System.out.println("[MF] 引擎: 个数=" + engines + " engineOffset=" + eo + " engineSize=" + es
             + " hitSize=" + mega.hitSize() + "（oct 比例 @" + refOffset + " / @" + refSize + "）");
         check("有飞行成员的巨兽有引擎（原来恒为 0）", engines > 0);
-        // 用户要求：合体时有飞行成员，巨兽就"是"飞行单位（type.flying = true）
-        check("有飞行成员时巨兽 type.flying = true（用户要求的飞行单位语义）", mega.type.flying);
+        // 用户设计稿：Σ(飞行成员 hitSize) > Σ(地面成员 hitSize) 才"是"飞行单位
+        // （这个编组是 mace + 2×oct + poly，2×66 的空军份量压过地面，所以是飞行单位；
+        //  地面为主、只带一架小飞机的混编不飞，见 MegaFlightRuleTest）
+        check("空军为主时巨兽 type.flying = true（设计稿的飞行单位语义）", mega.type.flying);
         check("居中一个引擎（同 flare / oct 的画法）", engines == 1);
         check("引擎位置随体型放大（engineOffset ≈ hitSize × 46/66 = " + (mega.hitSize() * refOffset) + "）",
             Math.abs(eo - mega.hitSize() * refOffset) < 0.01f);

@@ -118,6 +118,14 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
      * 否则混合编组（飞机+坦克）合体后飞机的能力直接丢失。
      */
     private transient boolean hasFlyer = false, hasNaval = false, hasGround = false;
+    /**
+     * 能不能飞：**按用户的设计稿** —— "如果飞行单位的 hitsize 总和大于地面单位的话就可以飞"。
+     * 只算 hitSize 之和（空中份量压过地面份量才升空），不是"有飞行成员就飞"：
+     * 旧口径会让"1 架小飞机 + 2 台坦克"这种编组直接固定飞天（用户报的
+     * "组了空军后会固定飞天"就是这么来的）。能不能飞、飞不飞是按这个值定的，
+     * 见 {@link #moveMode()} 与 {@link #update()}。
+     */
+    private transient boolean canFly = false;
     /** 成员里有没有爬爬虫（Crawlc）：它们在深水里的速度系数和普通单位不一样（见 {@link #floorSpeedMultiplier()}）。 */
     private transient boolean hasCrawler = false;
 
@@ -275,6 +283,8 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         int domCount = 0;
         ObjectMap<UnitType, Integer> tally = new ObjectMap<>();
         boolean fly = false, nav = false, gnd = false, crawl = false;
+        // 设计稿："如果飞行单位的 hitsize 总和大于地面单位的话就可以飞" —— 两边的 hitSize 之和
+        float sumAirHit = 0f, sumGroundHit = 0f;
 
         for(int i = 0; i < members.size; i++){
             UnitPayload up = members.get(i);
@@ -285,10 +295,13 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             // 移动能力：有飞机就能飞、有海军就能游、有陆地就能跑
             if(t.flying){
                 fly = true;
+                sumAirHit += t.hitSize;
             }else if(UnitComboMerge.isNaval(t)){
                 nav = true;
+                sumGroundHit += t.hitSize;
             }else{
                 gnd = true;
+                sumGroundHit += t.hitSize;
                 // 爬爬虫（Crawlc）在深水里的速度系数是原版写死的 0.45，和普通单位不同
                 try{
                     if(t.constructor != null && t.constructor.get() instanceof mindustry.gen.Crawlc) crawl = true;
@@ -325,6 +338,10 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         hasNaval = nav;
         hasGround = gnd;
         hasCrawler = crawl;
+        // 【能不能飞】设计稿口径：飞行成员的 hitSize 之和 > 地面成员的 hitSize 之和。
+        // 纯空军（地面为 0）自然成立；"1 架小飞机 + 2 台坦克"这种就落地当普通地面巨兽，
+        // 不会被一架小飞机整体拖上天（用户报的"组了空军后会固定飞天"）。
+        canFly = sumAirHit > sumGroundHit;
         dominant = dom;
         maxHealth(Math.max(sumMax, 1f));
         armor(sumArmor);
@@ -872,23 +889,32 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         // 按成员构成指派：有陆地成员走地面代价；纯海军走水面；纯飞行无视地形。
         {
             boolean g = false, n = false, fl = false;
+            // 设计稿口径：飞行成员 hitSize 之和 > 地面成员 hitSize 之和 → 这只巨兽"是"飞行单位
+            float airHit = 0f, groundHit = 0f;
             UnitType engRef = null;
             for(UnitType t : tally.keys()){
+                int cnt = tally.get(t);
                 if(t.flying){
                     fl = true;
+                    airHit += t.hitSize * cnt;
                     // 引擎参考：飞行成员里体型最大的那台（它自己的 engineOffset/engineSize
                     // 最接近"巨兽该长什么样"；flare 那套只是没有飞行成员参考时的兜底）
                     if(engRef == null || t.hitSize > engRef.hitSize) engRef = t;
+                }else{
+                    groundHit += t.hitSize * cnt;
+                    if(UnitComboMerge.isNaval(t)) n = true;
+                    else g = true;
                 }
-                else if(UnitComboMerge.isNaval(t)) n = true;
-                else g = true;
             }
-            // 有飞行成员 → 会升空 → 按 hitSize 生成引擎（见 MegaUnitType.rebuildEngines）
-            ct.hoverEngines = fl;
-            // 【用户要求】合体时只要有飞行成员，组合巨兽就"是"飞行单位：
-            // 类型上 flying=true（不只靠 elevation 动态判），这样原版所有按 type.flying 分派的
-            // 逻辑（影高/图层、太空环境、防空索敌、寻路代价、绘制里的飞行层）一致按飞行处理。
-            ct.flying = fl;
+            // 【能不能飞按用户设计稿】"如果飞行单位的 hitsize 总和大于地面单位的话就可以飞"：
+            // 不是"有飞行成员就飞"——那样"1 架小飞机 + 2 台坦克"会被一架小飞机整体拖上天
+            //（用户报的"组了空军后会固定飞天"）。
+            boolean canFly = airHit > groundHit;
+            // 能飞 → 按 hitSize 生成引擎（见 MegaUnitType.rebuildEngines）
+            ct.hoverEngines = canFly;
+            // 能飞就把类型上的 flying 也置真：原版所有按 type.flying 分派的逻辑
+            //（影高/图层、太空环境、防空索敌、寻路代价、绘制里的飞行层）一致按飞行处理。
+            ct.flying = canFly;
             if(n){
                 // 纯船编组：照原版 init() 对山东（WaterMovec）的那几条来
                 //   naval：影响 CommandAI 的通行判定（船默认只认水路）
@@ -925,6 +951,14 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
                 ct.pathCost = mindustry.ai.Pathfinder.costTypes.get(mindustry.ai.Pathfinder.costNone);
                 ct.pathCostId = mindustry.ai.ControlPathfinder.costIdGround;
             }
+            // 【流场代价类型】原版 initPathType() 里 flowfieldPathType 也按同一套优先级指定；
+            // 巨兽类型 late 注册、init() 从没跑过，它停在 -1 —— AIController.pathfind 会拿 -1
+            // 当 cost 类型去找流场（找不到 → 没指令的巨兽不会自己走），照原版口径补上。
+            ct.flowfieldPathType = canFly ? mindustry.ai.Pathfinder.costNone
+                : ct.naval ? mindustry.ai.Pathfinder.costNaval
+                : ct.allowLegStep ? mindustry.ai.Pathfinder.costLegs
+                : ct.hovering ? mindustry.ai.Pathfinder.costHover
+                : mindustry.ai.Pathfinder.costGround;
         }
 
         // 指令面板（同 UnitComboMerge.register 对模板的手工补齐）
@@ -1540,6 +1574,11 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         return hasFlyer;
     }
 
+    /** 能不能飞：飞行成员的 hitSize 之和 > 地面成员的 hitSize 之和（用户设计稿的口径）。 */
+    public boolean canFly(){
+        return canFly;
+    }
+
     /** 是否有海军成员（能游）。 */
     public boolean hasNaval(){
         return hasNaval;
@@ -1971,7 +2010,8 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
      * </ul>
      */
     public int moveMode(){
-        if(hasFlyer) return MODE_FLY;
+        // 【能不能飞按设计稿算】"飞行单位的 hitsize 总和大于地面单位"才升空，见 canFly 字段。
+        if(canFly) return MODE_FLY;
         mindustry.world.blocks.environment.Floor on = floorOn();
         boolean deep = on != null && on.isLiquid && on.drownTime > 0f;
         if(deep){
@@ -2042,8 +2082,9 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         // （updateBoosting 里 shouldBoost = boost || onSolid() || (isFlying() && !canLand())，
         //  而 canLand() 在深水上会返回 true），于是刚升空的巨兽会被一点点拉回地面，
         // isFlying() 变 false —— 用户报的"合体时有飞行单位却不是飞行单位"就是这么来的。
-        // 有飞行成员就直接钉在 1，不给原版那套抢高度的机会。
-        if(hasFlyer){
+        // 能飞（设计稿：飞行成员 hitSize 之和 > 地面成员 hitSize 之和）就直接钉在 1，
+        // 不给原版那套抢高度的机会；不能飞的编组照常落地。
+        if(canFly){
             elevation = 1f;
             return;
         }
