@@ -53,11 +53,20 @@ public class UnitComboDamage{
     /** 正在执行"别的模组的脚本构造器"的深度，见 {@link #wrapScript(Prov)} / {@link #scriptAware(Prov, Prov)}。 */
     private static int scriptCtorDepth;
 
+    /** 我们装上去（或包过）的构造器：世界加载后补扫时用来跳过，免得把镜像构造器又包成"脚本=原版"。 */
+    private static final arc.struct.ObjectSet<Prov<?>> ourProvs = new arc.struct.ObjectSet<>();
+
+    /** 我们见过的**原版**构造器（替换前那一份）：补扫时用来判断"这个构造器是不是新出现的模组构造器"。 */
+    private static final arc.struct.ObjectSet<Prov<?>> vanillaProvs = new arc.struct.ObjectSet<>();
+
     /** 在 mod init 时调用：替换全部原版单位实体。 */
     public static void register(){
         initMirrors();
         replaceUnitConstructors();
         replaceEntityMapping();
+        // 有的模组不是加载脚本时、而是更晚（比如第一次进世界）才给单位类型设构造器 —— 那时我们
+        // 已经替换过一轮，它们新设的构造器就没被包上标记。每次世界加载后再补扫一遍。
+        arc.Events.on(mindustry.game.EventType.WorldLoadEvent.class, e -> wrapForeignConstructors());
     }
 
     /**
@@ -136,6 +145,7 @@ public class UnitComboDamage{
             types.add(type);
             ctors.add(ctor);
             classes.add(sample.getClass());
+            vanillaProvs.add(ctor);
         }
 
         for(int i = 0; i < types.size; i++){
@@ -146,7 +156,31 @@ public class UnitComboDamage{
             // ② 别的模组自己的实体类（Rhino 适配器等）→ 原样保留行为，只包一层"脚本构造器"标记，
             //    这样它们在运行期被游戏调用时，内部那句 extend(原版 type.constructor.get().class)
             //    同样能拿到游戏自己的类。
-            type.constructor = rep != null ? scriptAware(ctor, rep) : wrapScript(ctor);
+            Prov<Unit> installed = rep != null ? scriptAware(ctor, rep) : wrapScript(ctor);
+            type.constructor = installed;
+            ourProvs.add(installed);
+        }
+    }
+
+    /**
+     * 【兜底补扫】模组可能在更晚的时候（例如第一次进世界）才设置单位构造器 —— 那时
+     * {@link #replaceUnitConstructors()} 已经跑完，它们的新构造器没被包上标记。这里每次世界加载
+     * 后再扫一遍：凡是"既不是我们装的、也不是我们见过的原版构造器"的，就当成别的模组的构造器包上
+     * 脚本标记，这样它们在运行期调用 {@code extend(UnitTypes.<原版>.constructor.get().class)}
+     * 时同样拿得到游戏类。
+     *
+     * <p>【注意：补扫不能取样】取样会真的执行别的模组的脚本构造器，而那正是安卓上会失败的地方
+     *（适配器要继承模组类）—— 所以这里只按"构造器对象是谁"来判断，绝不调用 get()。
+     */
+    private static void wrapForeignConstructors(){
+        for(UnitType type : Vars.content.units()){
+            Prov<? extends Unit> ctor = type.constructor;
+            if(ctor == null || UnitComboMerge.isCoreUnit(type) || ourProvs.contains(ctor)) continue;
+            if(vanillaProvs.contains(ctor)) continue;   // 还是原版构造器 → 不动
+            Prov<Unit> wrapped = wrapScript(ctor);
+            ourProvs.add(wrapped);
+            type.constructor = wrapped;
+            Log.info("[combineunit] 单位类型 @ 的构造器是模组自定义的，已包上脚本标记（避免安卓上继承到镜像类）", type.name);
         }
     }
 

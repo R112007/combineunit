@@ -219,6 +219,28 @@ public class ScriptModCompatTest implements ApplicationListener{
         check("镜像类本身确实继承游戏类（" + hierarchy(daggerSample.getClass()) + "）",
             hasCombineMirrorInHierarchy(daggerSample.getClass()) && !isForeignClass(daggerSample.getClass().getSuperclass()));
 
+        // ---------- ④ 兜底：更晚（世界加载时）才设构造器的模组也要被补扫到 ----------
+        {
+            UnitType late = null;
+            for(UnitType t : Vars.content.units()) if(t.name.contains("ctcompat-late-unit")) late = t;
+            if(late == null){
+                check("找到了「晚设构造器」的复现单位（前置）", false);
+            }else{
+                Class<?> cls = null;
+                try{
+                    Unit probe = late.constructor.get();
+                    cls = probe == null ? null : probe.getClass();
+                }catch(Throwable ex){
+                    log("晚设构造器单位构造失败: " + ex);
+                }
+                log("晚设构造器单位实体类: " + (cls == null ? "null" : cls.getName())
+                    + "（继承链 " + (cls == null ? "-" : hierarchy(cls)) + "）");
+                check("世界加载后补扫到「晚设构造器」的模组单位，它继承的也是游戏类（"
+                    + (cls != null && isGameClass(cls.getSuperclass())) + "）",
+                    cls != null && isGameClass(cls.getSuperclass()) && !hasCombineMirrorInHierarchy(cls));
+            }
+        }
+
         System.out.println("[CTC] RESULT " + (fail==0?"ALL PASS":(fail+" FAILED")) + " (pass="+pass+")");
         System.exit(fail==0?0:1);
       }catch(Throwable t){ t.printStackTrace(); System.exit(2); }

@@ -10,4 +10,13 @@
 
 const compatUnit = extend(UnitType, "ctcompat-unit", {});
 compatUnit.constructor = prov(() => extend(UnitTypes.eclipse.constructor.get().class, {}));
-exports.compatUnit = compatUnit;
+
+/*
+ * 另一些模组不是在加载脚本时、而是在**更晚**（例如第一次进世界）才设构造器 —— 那时组合模组
+ * 已经替换过一轮了，所以组合模组还要在每次世界加载后再补扫一遍（wrapForeignConstructors）。
+ * 这个单位用来验那条兜底路径。
+ */
+const lateUnit = extend(UnitType, "ctcompat-late-unit", {});
+Events.on(WorldLoadEvent, e => {
+    lateUnit.constructor = prov(() => extend(UnitTypes.corvus.constructor.get().class, {}));
+});
