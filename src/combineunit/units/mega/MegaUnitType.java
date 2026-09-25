@@ -5,6 +5,7 @@ import arc.graphics.g2d.Draw;
 import arc.graphics.g2d.TextureRegion;
 import arc.math.Angles;
 import arc.math.Mathf;
+import arc.util.Nullable;
 import arc.util.Tmp;
 import mindustry.content.UnitTypes;
 import mindustry.graphics.Layer;
@@ -49,6 +50,20 @@ public class MegaUnitType extends UnitType {
      */
     public float engineOffsetRatio = refEngineOffset / refHitSize, engineSizeRatio = refEngineSize / refHitSize;
 
+    /**
+     * 引擎布局的参考成员类型（有飞行成员时由 {@link MegaUnitEntity} 指定为"体型最大的那台飞行成员"）。
+     *
+     * <p>原版单位的引擎**不一定只有居中一个**：{@code avert}/{@code obviate} 这类是
+     * {@code setEnginesMirror(...)} 摆出来的多个喷口（avert 4 个、obviate 3 个），
+     * 尺寸写在每个 {@code UnitEngine.radius} 上；avert 甚至把 {@code engineSize} 设成 0
+     * （原版 {@code init()} 只在 {@code engineSize > 0} 时才补"居中一个"）。
+     * 所以 {@link #rebuildEngines()} 必须能按参考成员**整套**复制引擎布局，
+     * 而不是永远只画居中的那一个。为 {@code null} 时退回 flare 那套比例。
+     */
+    public @Nullable UnitType engineRef;
+
+    /**
+     * 补齐 {@link UnitType#init()} / {@link UnitType#load()} 才会写的那些字段。
     /**
      * 补齐 {@link UnitType#init()} / {@link UnitType#load()} 才会写的那些字段。
      *
@@ -120,6 +135,9 @@ public class MegaUnitType extends UnitType {
      * 而巨兽类型是 late 注册、init() 从没跑过 —— {@code engines} 永远是空表，
      * 于是"会飞的巨兽"一点尾焰都没有。这里按 hitSize × 比例算出尺寸与位置
      * （比例默认取自 flare；有飞行成员时由 MegaUnitEntity 换成那台单位的参数）。
+     *
+     * <p>参考成员（{@link #engineRef}）有**整套**引擎表时按体型比例整套复制
+     * （avert 4 个喷口、obviate 3 个），没有参考时才退回"居中一个"的 flare 画法。
      */
     public void rebuildEngines() {
         engines.clear();
@@ -129,6 +147,25 @@ public class MegaUnitType extends UnitType {
 
         engineOffset = hitSize * engineOffsetRatio;
         engineSize = hitSize * engineSizeRatio;
+
+        // 【多引擎成员：照抄它的**整套**引擎布局】avert/obviate 这类单位的喷口写在
+        // `type.engines` 里（位置/朝向/每个喷口自己的 radius；avert 甚至把 engineSize 设成 0，
+        // 因为原版 init() 只在 engineSize > 0 时才补"居中一个"）。以前这里永远只画居中的一个
+        // → 带 avert 的巨兽看着只有一个大喷口（用户报的"有多个引擎的单位合体后没画多个引擎"）。
+        // 现在按体型比例（综合 hitSize ÷ 参考成员 hitSize）把参考成员的整套引擎复制过来，
+        // 位置/半径/朝向/颜色一起缩放，喷口数量和相对布局与原版一致。
+        if (engineRef != null && engineRef.hitSize > 0.01f && engineRef.engines.size > 0) {
+            float s = hitSize / engineRef.hitSize;
+            for (UnitEngine e : engineRef.engines) {
+                UnitEngine c = e.copy();
+                c.x *= s;
+                c.y *= s;
+                c.radius *= s;
+                engines.add(c);
+            }
+            return;
+        }
+
         if (engineOffset <= 0.01f || engineSize <= 0.01f)
             return;
 

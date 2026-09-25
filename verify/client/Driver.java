@@ -20,6 +20,10 @@ import mindustry.ui.dialogs.*; import mindustry.world.*; import mindustry.world.
  *   mech     dagger + fortress（机甲成员）融合：机甲腿
  *   duo      dagger + vela：碰撞箱 + 武器（治疗类武器不许被代打）
  *   shipmega 两艘 risso 在深水里融合：地形速度系数（船那套）与浮在水面
+ *   hover    elude / crawler 与各自巨兽并排：cell 贴图 + 低血量闪烁
+ *   tank     vanquish×2 + conquer：履带绘制与碾压
+ *   flight   2×dagger（贴地）vs 2×dagger+1×flare（有飞机就悬空）
+ *   engines  原版 avert vs 2×avert 巨兽：多引擎成员的 4 个喷口要整套照抄
  */
 public class Driver extends Mod{
     static String outDir = System.getProperty("drv.out", System.getProperty("user.home") + "/sd/shots");
@@ -221,8 +225,23 @@ public class Driver extends Mod{
                 Timer.schedule(() -> shot("flight_rule"), 24f);
                 Timer.schedule(Driver::flightReport, 26f);
                 Timer.schedule(() -> { Log.info("[drv] flight 模式结束 frames=@", frames); Core.app.exit(); }, 32f);
+            }else if(mode.equals("engines")){
+                // 用户报："有多个引擎的单位合体后没画多个引擎，比如 avert"。
+                // avert 的喷口是 setEnginesMirror(...) 摆出来的 4 个（engineSize=0、尺寸写在
+                // 每个 UnitEngine.radius 上），巨兽以前只画"居中一个"。这里并排放一只原版 avert
+                // 和 2×avert 的巨兽，数喷口。
+                installFrameCounter();
+                installCameraLock();
+                keepDialogsHidden();
+                Timer.schedule(Driver::setupMidScene, 5f);
+                Timer.schedule(Driver::enginesScene, 10f);
+                Timer.schedule(Driver::enginesReport, 16f);
+                Timer.schedule(() -> Vars.renderer.setScale(3f), 18f);
+                Timer.schedule(() -> shot("engines_mega"), 23f);
+                Timer.schedule(Driver::enginesReport, 25f);
+                Timer.schedule(() -> { Log.info("[drv] engines 模式结束 frames=@", frames); Core.app.exit(); }, 30f);
             }else{
-                Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega|hover|icon|mid|tank|sf|flight）", mode);
+                Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega|hover|icon|mid|tank|sf|flight|engines）", mode);
                 Core.app.exit();
             }
         });
@@ -1364,6 +1383,39 @@ public class Driver extends Mod{
                     u.canShoot());
             }
         }catch(Throwable t){ Log.err("[drv] flightReport failed", t); }
+    }
+
+    // ---------------- engines（多引擎成员：avert 的 4 个喷口要整套照抄到巨兽上） ----------------
+    static Unit enginesMega, enginesRef;
+
+    static void enginesScene(){
+        try{
+            float cx = midOx * 8f, cy = midOy * 8f;
+            enginesMega = combineMerge(cx + 40f, cy - 30f, UnitTypes.avert, UnitTypes.avert);
+            enginesRef = UnitTypes.avert.create(Team.sharded);
+            enginesRef.set(cx - 45f, cy + 25f);
+            enginesRef.add();
+            camTarget = enginesMega;
+        }catch(Throwable t){ Log.err("[drv] enginesScene failed", t); }
+    }
+
+    static String engineDump(Seq<UnitType.UnitEngine> list){
+        StringBuilder sb = new StringBuilder();
+        for(var e : list)
+            sb.append(" (").append(Math.round(e.x)).append(",").append(Math.round(e.y))
+              .append(" r").append(String.format("%.1f", e.radius)).append(" ").append(Math.round(e.rotation)).append("deg)");
+        return sb.toString();
+    }
+
+    static void enginesReport(){
+        try{
+            Log.info("[drv] engines 参考 avert: hitSize=@ engines=@ →@",
+                UnitTypes.avert.hitSize, UnitTypes.avert.engines.size, engineDump(UnitTypes.avert.engines));
+            Unit u = enginesMega;
+            if(u == null){ Log.err("[drv] engines: 没有巨兽"); return; }
+            Log.info("[drv] engines 巨兽(2×avert): hitSize=@ elevation=@ isFlying=@ engines=@ →@",
+                u.hitSize(), u.elevation(), u.isFlying(), u.type.engines.size, engineDump(u.type.engines));
+        }catch(Throwable t){ Log.err("[drv] enginesReport failed", t); }
     }
 
     // ---------------- sf（饱和火力 mod 的神渎：玩家控制能不能开火） ----------------

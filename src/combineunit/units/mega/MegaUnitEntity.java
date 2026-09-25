@@ -932,6 +932,10 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
                 float refHit = Math.max(engRef.hitSize, 1f);
                 if(engRef.engineOffset > 0.01f) ct.engineOffsetRatio = engRef.engineOffset / refHit;
                 if(engRef.engineSize > 0.01f) ct.engineSizeRatio = engRef.engineSize / refHit;
+                // 【整套引擎布局都照抄它】avert/obviate 的喷口是 setEnginesMirror 摆出来的多个，
+                // 只按 engineOffset/engineSize 画"居中一个"会丢喷口（用户报的"有多个引擎的单位
+                // 合体后没画多个引擎，比如 avert"）。见 MegaUnitType.rebuildEngines()。
+                ct.engineRef = engRef;
             }
             // pathCost 读旧 Pathfinder.costTypes（按下标取实例），pathCostId 读
             // ControlPathfinder.costTypes（ground=0/hover=1/legs=2/naval=3）

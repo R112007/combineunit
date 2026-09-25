@@ -247,6 +247,52 @@ public class MegaFieldTest implements ApplicationListener{
         for(var e : mega.type.engines)
             System.out.println("[MF]   引擎 @" + e.x + "," + e.y + " 半径=" + e.radius + " 朝向=" + e.rotation);
 
+        // ---------- 多引擎成员：avert / obviate 的喷口"整套"照抄 ----------
+        // 用户报："有多个引擎的单位合体后没画多个引擎，比如 avert"。
+        // avert 是 setEnginesMirror(...) 摆出来的 4 个喷口（engineSize=0、尺寸写在每个
+        // UnitEngine.radius 上）；obviate 是 1 个居中 + 1 对镜像 = 3 个。
+        // 以前巨兽只会画"居中一个"，现在按体型比例整套复制（位置/半径/朝向一起缩放）。
+        for(UnitType et : new UnitType[]{UnitTypes.avert, UnitTypes.obviate}){
+            Unit a = et.create(Team.sharded);
+            a.set(ox * 8f + 600f, oy * 8f);
+            a.add();
+            Unit b = et.create(Team.sharded);
+            b.set(ox * 8f + 620f, oy * 8f);
+            b.add();
+            run(5);
+            Unit em = null;
+            try{
+                Class<?> c = Class.forName("combineunit.units.UnitComboMerge", true, Vars.mods.getMod("combineunit").main.getClass().getClassLoader());
+                Object m3 = c.getMethod("merge", Unit.class).invoke(null, a);
+                if(m3 instanceof Unit u3) em = u3;
+            }catch(Throwable t){ System.out.println("[MF] 融合 " + et.name + " 失败: " + t); }
+            if(em == null){ check(et.name + " 能融合（前置）", false); continue; }
+            int refN = et.engines.size, megaN = em.type.engines.size;
+            float esc = em.hitSize() / et.hitSize;
+            boolean same = refN > 0 && refN == megaN;
+            if(same){
+                for(int i = 0; i < refN; i++){
+                    var r = et.engines.get(i); var g = em.type.engines.get(i);
+                    if(Math.abs(g.x - r.x * esc) > 0.01f || Math.abs(g.y - r.y * esc) > 0.01f
+                        || Math.abs(g.radius - r.radius * esc) > 0.01f || Math.abs(g.rotation - r.rotation) > 0.01f){
+                        same = false;
+                        break;
+                    }
+                }
+            }
+            StringBuilder sb = new StringBuilder();
+            for(var e : em.type.engines)
+                sb.append(" (").append(Math.round(e.x)).append(",").append(Math.round(e.y))
+                  .append(" r").append(String.format("%.1f", e.radius)).append(" ").append(Math.round(e.rotation)).append("°)");
+            System.out.println("[MF] " + et.name + " 巨兽引擎: 参考成员=" + refN + " 巨兽=" + megaN
+                + " 体型比例=" + String.format("%.3f", esc) + " →" + sb
+                + "（hitSize " + em.hitSize() + "，elevation=" + em.elevation() + "）");
+            check(et.name + " 的 " + refN + " 个喷口整套照抄（位置/半径/朝向都按体型缩放）", same);
+            check(et.name + " 巨兽在飞（喷口才画得出来）", em.type.flying && em.isFlying());
+            em.kill();
+            run(5);
+        }
+
         // 纯地面编组（两台没有飞行能力的单位）：不该有引擎、也不该升空
         Unit dagger = UnitTypes.dagger.create(Team.sharded);
         dagger.set(ox * 8f + 140f, oy * 8f);
