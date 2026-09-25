@@ -232,6 +232,50 @@ public class MegaUnitType extends UnitType {
         weapons.add(newWeapon());
     }
 
+    /**
+     * 悬浮信息栏里"这是哪种单位"那一行改成**成员构成**。
+     *
+     * <p>原版 {@code UnitType.display()} 与 UI 模组（例如 mi2-utilities 的悬浮信息栏）都拿
+     * {@code unit.type.localizedName} 当类型名显示在屏幕上方；而巨兽派生类型共用**占位类型**，
+     * 名字是通用名"组合巨兽" —— 玩家在游戏上方看到的永远是它（用户报的
+     * "mi2 模组会在游戏上方显示组合巨兽的 type，这个不要"）。巨兽的身份本来就是成员构成，
+     * 这里换成构成描述（口径同 {@link combineunit.units.UnitComboMerge#composition(Unit)}，
+     * 例如 "战锤×2, 领主×1"）。
+     *
+     * <p>只改这一行文字：原版那行是 {@code 玩家名 + "\n[lightgray]" + localizedName}，
+     * 我们只把其中的 localizedName 换成构成，图标/血条/技能条/载荷都原样保留。
+     * mi2 的悬浮信息栏是"找到文字等于 {@code unit.type.localizedName} 的那一行再改写"，
+     * 换掉之后它找不到、就保持我们这一行 —— 原版和 mi2 两条路都显示构成。
+     */
+    @Override
+    public void display(Unit unit, arc.scene.ui.layout.Table table) {
+        super.display(unit, table);
+        if (unit == null || localizedName == null || localizedName.isEmpty())
+            return;
+        String comp = combineunit.units.UnitComboMerge.composition(unit);
+        // 成员数据还没同步过来（快照刚落地）时保持原版显示，别把这一行抹成空的
+        if (comp == null || comp.isEmpty())
+            return;
+        retitle(table, localizedName, comp);
+    }
+
+    /** 把 element 子树里"含老名字的 Label"换成新文字（只改文字，别的控件一律不动）。 */
+    static void retitle(arc.scene.Element e, String old, String now) {
+        if (e == null)
+            return;
+        if (e instanceof arc.scene.ui.Label l) {
+            CharSequence cs = l.getText();
+            String s = cs == null ? null : cs.toString();
+            if (s != null && s.contains(old))
+                l.setText(s.replace(old, now));
+            return;
+        }
+        if (e instanceof arc.scene.Group g) {
+            for (arc.scene.Element c : g.getChildren())
+                retitle(c, old, now);
+        }
+    }
+
     /** 幽灵武器实例，见构造器注释。包级私有以便模拟/测试断言用。 */
     static mindustry.type.Weapon newWeapon() {
         mindustry.type.Weapon w = new mindustry.type.Weapon("combine-ghost-weapon");
