@@ -209,16 +209,15 @@ public class Driver extends Mod{
                 Timer.schedule(Driver::sfReport, 46f);
                 Timer.schedule(() -> { Log.info("[drv] sf 模式结束 frames=@", frames); Core.app.exit(); }, 52f);
             }else if(mode.equals("flight")){
-                // 用户设计稿："飞行单位的 hitsize 总和大于地面单位的话就可以飞"。
-                // 并排两个编组：左边 2×dagger + 1×flare（地面为主 → 该贴地），
-                // 右边 2×flare + 1×dagger（空军为主 → 该悬空）。
+                // 用户 2026-09-25 的口径："只要单位组里有飞机，组合巨兽就能飞"。
+                // 并排两个编组：左 2×dagger（纯地面 → 该贴地），右 2×dagger + 1×flare（有飞机 → 该悬空）。
                 installFrameCounter();
                 installCameraLock();
                 keepDialogsHidden();
                 Timer.schedule(Driver::setupMidScene, 5f);
                 Timer.schedule(Driver::flightScene, 10f);
                 Timer.schedule(Driver::flightReport, 18f);
-                Timer.schedule(() -> Vars.renderer.setScale(2f), 20f);
+                Timer.schedule(() -> Vars.renderer.setScale(2.5f), 20f);
                 Timer.schedule(() -> shot("flight_rule"), 24f);
                 Timer.schedule(Driver::flightReport, 26f);
                 Timer.schedule(() -> { Log.info("[drv] flight 模式结束 frames=@", frames); Core.app.exit(); }, 32f);
@@ -1320,15 +1319,20 @@ public class Driver extends Mod{
         }catch(Throwable t){ Log.err("[drv] tankDrive failed", t); }
     }
 
-    // ---------------- flight（设计稿的"能不能飞"口径：地面为主不飞、空军为主才飞） ----------------
+    // ---------------- flight（"有飞机就飞"：纯地面贴地、带一架飞机就悬空） ----------------
     static Unit flightGround, flightAir;
 
     static void flightScene(){
         try{
             float cx = midOx * 8f, cy = midOy * 8f;
-            flightGround = combineMerge(cx - 110f, cy + 60f, UnitTypes.dagger, UnitTypes.dagger, UnitTypes.flare);
-            flightAir = combineMerge(cx + 110f, cy - 20f, UnitTypes.flare, UnitTypes.flare, UnitTypes.dagger);
-            // 镜头挂在空军那只上：地面那只在画面左侧、空军那只在中间偏右，两只都能入镜
+            // 左：纯地面（2×dagger → 贴地）；右：2×dagger + 1×flare（有一架飞机 → 悬空）。
+            // 用户 2026-09-25 的口径就是"只要组里有飞机就能飞"，所以左边必须是**纯**地面编组，
+            // 右边哪怕只有一架小飞机也应该离地。
+            // 【两只都要在同一张图里】setupMidScene 只保证 (midOx,midOy) 周围 ±5 格是陆地，
+            // 所以两只都放在 ±30px 内（都不会落水）；镜头挂在带飞机那只上，
+            // 按 2.5 倍缩放大致对应屏幕上"左下 300,475 / 中心 450,350"，两张都能看清。
+            flightGround = combineMerge(cx - 30f, cy + 25f, UnitTypes.dagger, UnitTypes.dagger);
+            flightAir = combineMerge(cx + 30f, cy - 25f, UnitTypes.dagger, UnitTypes.dagger, UnitTypes.flare);
             camTarget = flightAir;
         }catch(Throwable t){ Log.err("[drv] flightScene failed", t); }
     }
@@ -1352,7 +1356,7 @@ public class Driver extends Mod{
 
     static void flightReport(){
         try{
-            for(var e : new Object[][]{{"地面为主 2×dagger+1×flare", flightGround}, {"空军为主 2×flare+1×dagger", flightAir}}){
+            for(var e : new Object[][]{{"纯地面 2×dagger（该贴地）", flightGround}, {"2×dagger+1×flare（有飞机该悬空）", flightAir}}){
                 Unit u = (Unit)e[1];
                 if(u == null){ Log.err("[drv] flight: @ 没有巨兽", e[0]); continue; }
                 Log.info("[drv] flight @: hitSize=@ type.flying=@ elevation=@ isFlying=@ moveMode=@ canShoot=@",

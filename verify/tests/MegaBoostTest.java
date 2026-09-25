@@ -210,8 +210,8 @@ public class MegaBoostTest implements ApplicationListener{
         }
 
         // ---------- ④ 空军为主的巨兽：一直悬空，但能开火（修前：canShoot=false，整只瘫痪） ----------
-        // 注意构成：按设计稿"飞行成员 hitSize 之和 > 地面成员 hitSize 之和"才能飞，所以这里用
-        // 2×flare + 1×dagger（18 > 8）而不是"随便带一架飞机"；地面为主的混编见 MegaFlightRuleTest。
+        // 注意构成：现在的口径是"组里有飞机就飞"（用户 2026-09-25），带一架 flare 就够；
+        // 各种混编的飞行判定专项见 MegaFlightRuleTest。
         {
             Unit mega = mergeAt(ox * 8f + 600f, oy * 8f, air, air, UnitTypes.dagger);
             if(mega == null){ check("带空军成员的巨兽能融合（前置）", false); }

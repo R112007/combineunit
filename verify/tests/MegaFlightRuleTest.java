@@ -6,18 +6,19 @@ import mindustry.game.*; import mindustry.gen.*; import mindustry.maps.Map; impo
 import mindustry.net.Net; import mindustry.type.*; import mindustry.ui.Fonts; import mindustry.world.*;
 
 /**
- * 用户设计稿（{@code ~/sd/组合单位.txt}）里的口径：
+ * 用户 2026-09-25 改的口径（推翻 {@code ~/sd/组合单位.txt} 里早期那句）：
  * <pre>
  *   超级组合：合成一个大单位，保留所有能力、武器、血量、护盾、护甲叠加……
- *   **如果飞行单位的 hitsize 总和大于地面单位的话就可以飞。**
+ *   **只要单位组里有飞机，组合巨兽就能飞。**
  * </pre>
  *
- * <p>以前实现的是"有飞行成员就能飞"：一架小飞机搭两台坦克也会整体固定飞天 ——
- * 用户报的"组了空军后会固定飞天，整个巨兽直接瘫痪"就是这么来的。
- * 现在按设计稿算：{@code Σ(飞行成员 hitSize) > Σ(地面成员 hitSize)} 才能飞；
+ * <p>中间一度按早期设计稿实现成"{@code Σ(飞行成员 hitSize) > Σ(地面成员 hitSize)} 才飞"
+ *（那时怕"1 架小飞机 + 2 台坦克"被整体拖上天而瘫痪），但用户现在明确要改回
+ * "有一架飞机就飞"。当年"组了空军就瘫痪"的根因（{@code canBoost} 被继承 → 悬空即禁开火）
+ * 早已由"派生类型恒 {@code canBoost=false}”根治（见 MegaBoostTest），所以悬空不再有副作用。
  * 派生类型的 {@code flying}、引擎、寻路代价、{@code moveMode()}、每帧 elevation 驱动全部用同一个判定。
  *
- * <p>本测试把四种构成都跑一遍（命中数/能不能飞/是不是真的落地/能不能开火）。
+ * <p>本测试把四种构成都跑一遍（能不能飞/是不是真的悬空/能不能开火）。
  */
 public class MegaFlightRuleTest implements ApplicationListener{
     static String dataDir="/tmp/mp_unit/data";
@@ -85,20 +86,20 @@ public class MegaFlightRuleTest implements ApplicationListener{
         u.controlWeapons(true, true);
     }
 
-    /** 一种构成：融合 → 看命中数/能不能飞/落地开车 → 能不能开火。 */
+    /** 一种构成：融合 → 看有没有飞行成员/能不能悬空/moveMode → 能不能开火。 */
     static void scenario(String tag, float x, float y, boolean expectFly, UnitType... types){
-        float air = 0f, ground = 0f;
-        for(UnitType t : types) if(t.flying) air += t.hitSize; else ground += t.hitSize;
+        int airCount = 0, groundCount = 0;
+        for(UnitType t : types) if(t.flying) airCount++; else groundCount++;
         Unit mega = mergeAt(x, y, types);
         if(mega == null){ check(tag + "：能融合（前置）", false); return; }
         run(30);   // 让它按自己的规则升空/落地
         boolean flying = mega.isFlying();
-        System.out.println("[MFR] " + tag + ": 飞行hitSize和=" + air + " 地面hitSize和=" + ground
+        System.out.println("[MFR] " + tag + ": 飞行成员=" + airCount + " 地面成员=" + groundCount
             + " → canFly=" + canFly(mega) + " type.flying=" + mega.type.flying
             + " isFlying=" + flying + " elevation=" + String.format("%.2f", mega.elevation())
             + " moveMode=" + moveMode(mega) + "（MODE_FLY=2）"
             + " 引擎=" + (mega.type.engines == null ? -1 : mega.type.engines.size));
-        check(tag + "：按设计稿判定能不能飞（期望 " + expectFly + "，实际 canFly=" + canFly(mega) + "）",
+        check(tag + "：有飞机就飞（期望 " + expectFly + "，实际 canFly=" + canFly(mega) + "）",
             canFly(mega) == expectFly);
         check(tag + "：type.flying 与判定一致（" + mega.type.flying + "）", mega.type.flying == expectFly);
         check(tag + "：真的（没）升空（isFlying=" + flying + "）", flying == expectFly);
@@ -158,9 +159,10 @@ public class MegaFlightRuleTest implements ApplicationListener{
         float bx = ox * 8f + 60f, by = oy * 8f;
         // ① 纯地面 → 不飞
         scenario("2×" + ground.name + "（纯地面）", bx, by, false, ground, ground);
-        // ② 地面为主的混编（1 架小飞机 + 2 台坦克）→ 按设计稿不飞（旧口径会被拖上天）
-        scenario("2×" + ground.name + " + 1×" + air.name + "（地面为主）", bx + 200f, by, false, ground, ground, air);
-        // ③ 空军为主的混编 → 飞
+        // ② 1 架小飞机 + 2 台坦克 → **有一架飞机就飞**（用户 2026-09-25 的新口径；
+        //    旧口径这里是不飞 —— 那种"地面为主"的判定已经被用户推翻）
+        scenario("2×" + ground.name + " + 1×" + air.name + "（小飞机 + 坦克）", bx + 200f, by, true, ground, ground, air);
+        // ③ 空军为主的混编 → 一样飞
         scenario("2×" + air.name + " + 1×" + ground.name + "（空军为主）", bx + 400f, by, true, air, air, ground);
         // ④ 纯空军 → 飞
         scenario("2×" + air.name + "（纯空军）", bx + 600f, by, true, air, air);

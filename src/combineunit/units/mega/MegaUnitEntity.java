@@ -119,10 +119,10 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
      */
     private transient boolean hasFlyer = false, hasNaval = false, hasGround = false;
     /**
-     * 能不能飞：**按用户的设计稿** —— "如果飞行单位的 hitsize 总和大于地面单位的话就可以飞"。
-     * 只算 hitSize 之和（空中份量压过地面份量才升空），不是"有飞行成员就飞"：
-     * 旧口径会让"1 架小飞机 + 2 台坦克"这种编组直接固定飞天（用户报的
-     * "组了空军后会固定飞天"就是这么来的）。能不能飞、飞不飞是按这个值定的，
+     * 能不能飞：**只要组里有飞行成员就能飞**（用户 2026-09-25 的口径）。
+     * 早期设计稿是"Σ飞行成员 hitSize &gt; Σ地面成员 hitSize 才能飞"（那时怕"1 架小飞机 +
+     * 2 台坦克"被整体拖上天而瘫痪），但现在 canBoost 不再继承、悬空不影响开火，
+     * 用户明确要求改回"有飞机就飞"。能不能飞、飞不飞都按这个值定，
      * 见 {@link #moveMode()} 与 {@link #update()}。
      */
     private transient boolean canFly = false;
@@ -283,8 +283,6 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         int domCount = 0;
         ObjectMap<UnitType, Integer> tally = new ObjectMap<>();
         boolean fly = false, nav = false, gnd = false, crawl = false;
-        // 设计稿："如果飞行单位的 hitsize 总和大于地面单位的话就可以飞" —— 两边的 hitSize 之和
-        float sumAirHit = 0f, sumGroundHit = 0f;
 
         for(int i = 0; i < members.size; i++){
             UnitPayload up = members.get(i);
@@ -295,13 +293,10 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             // 移动能力：有飞机就能飞、有海军就能游、有陆地就能跑
             if(t.flying){
                 fly = true;
-                sumAirHit += t.hitSize;
             }else if(UnitComboMerge.isNaval(t)){
                 nav = true;
-                sumGroundHit += t.hitSize;
             }else{
                 gnd = true;
-                sumGroundHit += t.hitSize;
                 // 爬爬虫（Crawlc）在深水里的速度系数是原版写死的 0.45，和普通单位不同
                 try{
                     if(t.constructor != null && t.constructor.get() instanceof mindustry.gen.Crawlc) crawl = true;
@@ -338,10 +333,13 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         hasNaval = nav;
         hasGround = gnd;
         hasCrawler = crawl;
-        // 【能不能飞】设计稿口径：飞行成员的 hitSize 之和 > 地面成员的 hitSize 之和。
-        // 纯空军（地面为 0）自然成立；"1 架小飞机 + 2 台坦克"这种就落地当普通地面巨兽，
-        // 不会被一架小飞机整体拖上天（用户报的"组了空军后会固定飞天"）。
-        canFly = sumAirHit > sumGroundHit;
+        // 【能不能飞】用户 2026-09-25 改口径（推翻 2026 早期的设计稿）：
+        // **只要单位组里有飞机，组合巨兽就能飞** —— 一架小飞机搭两台坦克也整体悬空。
+        // 旧口径（Σ飞行成员 hitSize > Σ地面成员 hitSize）会让"小飞机 + 坦克"的编组落地，
+        // 用户现在要的是"有飞机就飞"，所以这里只看有没有飞行成员。
+        // （能飞只是"悬空"；当年"组了空军就瘫痪"是 canBoost 那条坑，已由派生类型
+        //   canBoost=false 根治 —— 见 compTypeFor 末尾那段注释，飞着照样能开火。）
+        canFly = fly;
         dominant = dom;
         maxHealth(Math.max(sumMax, 1f));
         armor(sumArmor);
@@ -893,30 +891,25 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         // 寻路代价（原版 UnitType.init 的同款指派；巨兽类型 late 注册、init 从不执行，
         // pathCost 停在 null——CommandAI.isNearObstacle / UnitGroup 寻路 / isPathImpassable
         // 每帧直接读 type.pathCost，null 会每帧抛异常打断整个单位更新链 = 游戏极慢）。
-        // 按成员构成指派：有陆地成员走地面代价；纯海军走水面；纯飞行无视地形。
+        // 口径 = **原版 initPathType()，只是换成按"派生类型自己的字段"算**（派生类型的
+        // naval/allowLegStep/hovering/canDrown 都是上面按成员推出来的，它就是这只巨兽的类型）。
         {
             boolean g = false, n = false, fl = false;
-            // 设计稿口径：飞行成员 hitSize 之和 > 地面成员 hitSize 之和 → 这只巨兽"是"飞行单位
-            float airHit = 0f, groundHit = 0f;
             UnitType engRef = null;
             for(UnitType t : tally.keys()){
-                int cnt = tally.get(t);
                 if(t.flying){
                     fl = true;
-                    airHit += t.hitSize * cnt;
                     // 引擎参考：飞行成员里体型最大的那台（它自己的 engineOffset/engineSize
                     // 最接近"巨兽该长什么样"；flare 那套只是没有飞行成员参考时的兜底）
                     if(engRef == null || t.hitSize > engRef.hitSize) engRef = t;
                 }else{
-                    groundHit += t.hitSize * cnt;
                     if(UnitComboMerge.isNaval(t)) n = true;
                     else g = true;
                 }
             }
-            // 【能不能飞按用户设计稿】"如果飞行单位的 hitsize 总和大于地面单位的话就可以飞"：
-            // 不是"有飞行成员就飞"——那样"1 架小飞机 + 2 台坦克"会被一架小飞机整体拖上天
-            //（用户报的"组了空军后会固定飞天"）。
-            boolean canFly = airHit > groundHit;
+            // 【能不能飞】用户 2026-09-25 改的口径：**有飞行成员就能飞**（旧口径是两边 hitSize
+            // 之和比大小，见 canFly 字段的注释）。同一个判定驱动类型 flying、引擎、寻路代价与每帧高度。
+            boolean canFly = fl;
             // 能飞 → 按 hitSize 生成引擎（见 MegaUnitType.rebuildEngines）
             ct.hoverEngines = canFly;
             // 能飞就把类型上的 flying 也置真：原版所有按 type.flying 分派的逻辑
@@ -942,29 +935,47 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             }
             // pathCost 读旧 Pathfinder.costTypes（按下标取实例），pathCostId 读
             // ControlPathfinder.costTypes（ground=0/hover=1/legs=2/naval=3）
-            if(g){
-                // 原版 initPathType 的顺序：allowLegStep（腿）优先于普通地面
-                if(ct.allowLegStep){
-                    ct.pathCost = mindustry.ai.Pathfinder.costTypes.get(mindustry.ai.Pathfinder.costLegs);
-                    ct.pathCostId = mindustry.ai.ControlPathfinder.costIdLegs;
-                }else{
-                    ct.pathCost = mindustry.ai.Pathfinder.costTypes.get(mindustry.ai.Pathfinder.costGround);
-                    ct.pathCostId = mindustry.ai.ControlPathfinder.costIdGround;
-                }
-            }else if(n){
+            //
+            // 【"这只巨兽能不能进深水"决定用哪张代价表】原版 costGround 里
+            // `PathTile.allDeep(tile) ? impassable : ...` —— **深水对地面单位不可通行**；
+            // 而悬浮成员（ElevationMoveUnit，例如 elude：hovering=true、canDrown=false）和海军/两栖
+            // 成员本来就能待在深水上（不淹死），原版给这类单位发的正是 costHover：
+            // 液体照走、只挡实心方块。以前这里"有陆地成员就发 costGround"，于是**两只 elude 合体后
+            // 在指挥模式里怎么点都不肯下水** —— ControlPathfinder 拿 costGround 算，
+            // 目标格（深水）直接判定不可达，CommandAI 每帧 move=false，
+            // 只有附身手动 WASD 才动得起来（用户报的"ElevationMoveUnit 组合后的 ai 有问题、
+            // 得手动控制才行、不能指挥模式下操控其在液体上移动"）。
+            //
+            // 【判定用 canDrown，不用 ct.hovering】原版的"能过深水"其实就是
+            // `type.canDrown == false`（溺水判定 = `isGrounded() && type.canDrown`）；
+            // 而派生类型的 hovering 是"免地形状态"那条口径推出来的（成员实体是 ElevationMovec 就算），
+            // 而**机甲/履带/腿的实体类（MechUnit/TankUnit/…）本身就 implements ElevationMovec** ——
+            // 拿 ct.hovering 当门槛会把纯机甲巨兽也发成 hover 代价（它照样会淹死，却敢往深水里寻路）。
+            // 所以这里只认"这只巨兽进深水不会淹死"：hasNaval/悬浮成员都满足（它们 canDrown=false）。
+            boolean crossLiquid = !ct.canDrown;
+            if(ct.naval){
                 ct.pathCost = mindustry.ai.Pathfinder.costTypes.get(mindustry.ai.Pathfinder.costNaval);
                 ct.pathCostId = mindustry.ai.ControlPathfinder.costIdNaval;
+            }else if(ct.allowLegStep){
+                // 原版 initPathType 的顺序：腿类（allowLegStep）优先于普通地面/悬浮
+                ct.pathCost = mindustry.ai.Pathfinder.costTypes.get(mindustry.ai.Pathfinder.costLegs);
+                ct.pathCostId = mindustry.ai.ControlPathfinder.costIdLegs;
+            }else if(crossLiquid){
+                ct.pathCost = mindustry.ai.Pathfinder.costTypes.get(mindustry.ai.Pathfinder.costHover);
+                ct.pathCostId = mindustry.ai.ControlPathfinder.costIdHover;
             }else{
-                ct.pathCost = mindustry.ai.Pathfinder.costTypes.get(mindustry.ai.Pathfinder.costNone);
+                ct.pathCost = mindustry.ai.Pathfinder.costTypes.get(mindustry.ai.Pathfinder.costGround);
                 ct.pathCostId = mindustry.ai.ControlPathfinder.costIdGround;
             }
-            // 【流场代价类型】原版 initPathType() 里 flowfieldPathType 也按同一套优先级指定；
-            // 巨兽类型 late 注册、init() 从没跑过，它停在 -1 —— AIController.pathfind 会拿 -1
-            // 当 cost 类型去找流场（找不到 → 没指令的巨兽不会自己走），照原版口径补上。
-            ct.flowfieldPathType = canFly ? mindustry.ai.Pathfinder.costNone
-                : ct.naval ? mindustry.ai.Pathfinder.costNaval
+            // 【流场代价类型】原版 initPathType() 里 flowfieldPathType 按"naval → allowLegStep →
+            // flying → hovering → ground"指定；巨兽类型 late 注册、init() 从没跑过，它停在 -1 ——
+            // AIController.pathfind 会拿 -1 当 cost 类型去找流场（找不到 → 没指令的巨兽不会自己走）。
+            // 这里按同一优先级补上：能过深水的编组同样给 hover 流场，
+            // 否则"没指令时不会自己下水"（和上面 pathCost 同一个口径）。
+            ct.flowfieldPathType = ct.naval ? mindustry.ai.Pathfinder.costNaval
                 : ct.allowLegStep ? mindustry.ai.Pathfinder.costLegs
-                : ct.hovering ? mindustry.ai.Pathfinder.costHover
+                : canFly ? mindustry.ai.Pathfinder.costNone
+                : crossLiquid ? mindustry.ai.Pathfinder.costHover
                 : mindustry.ai.Pathfinder.costGround;
         }
 
@@ -1581,7 +1592,7 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         return hasFlyer;
     }
 
-    /** 能不能飞：飞行成员的 hitSize 之和 > 地面成员的 hitSize 之和（用户设计稿的口径）。 */
+    /** 能不能飞：组里有飞行成员就飞（用户 2026-09-25 的口径）。 */
     public boolean canFly(){
         return canFly;
     }
@@ -2017,7 +2028,7 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
      * </ul>
      */
     public int moveMode(){
-        // 【能不能飞按设计稿算】"飞行单位的 hitsize 总和大于地面单位"才升空，见 canFly 字段。
+        // 【能不能飞】组里有飞行成员就升空（用户 2026-09-25 的口径），见 canFly 字段。
         if(canFly) return MODE_FLY;
         mindustry.world.blocks.environment.Floor on = floorOn();
         boolean deep = on != null && on.isLiquid && on.drownTime > 0f;
@@ -2089,7 +2100,7 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         // （updateBoosting 里 shouldBoost = boost || onSolid() || (isFlying() && !canLand())，
         //  而 canLand() 在深水上会返回 true），于是刚升空的巨兽会被一点点拉回地面，
         // isFlying() 变 false —— 用户报的"合体时有飞行单位却不是飞行单位"就是这么来的。
-        // 能飞（设计稿：飞行成员 hitSize 之和 > 地面成员 hitSize 之和）就直接钉在 1，
+        // 能飞（组里有飞行成员，用户 2026-09-25 的口径）就直接钉在 1，
         // 不给原版那套抢高度的机会；不能飞的编组照常落地。
         if(canFly){
             elevation = 1f;
