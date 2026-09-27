@@ -995,6 +995,7 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         //   （用户报的"poly 和其它单位合体后 自动重建/辅助建造/治疗建筑/挖矿 命令消失"）。
         // 直接取每个成员的 commands/stances 求并集：成员类型是正常加载的内容，init() 跑过，
         // 它们的列表就是最权威的答案（还能顺带带上别的模组给单位加的指令）。
+        boolean anyBoostMember = false;
         for(UnitType t : tally.keys()){
             for(var cmd : t.commands)
                 if(!ct.commands.contains(cmd)) ct.commands.add(cmd);
@@ -1005,19 +1006,20 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             for(var immune : t.immunities)
                 ct.immunities.add(immune);
             if(t.canHeal) ct.canHeal = true;
+            if(t.canBoost) anyBoostMember = true;
         }
-        // 【助推（canBoost）一律不继承】见下面 applyLateDefaults 之后的注释块：
+        // 【助推（canBoost）：只给"纯地面"编组继承】见下面 applyLateDefaults 之后的注释块：
         // 原版 `UnitComp.canShoot()` 是 `!disarmed && !(type.canBoost && isFlying())` ——
-        // **只要 type.canBoost 且"离地"（`isFlying()` 判定是 elevation >= 0.09，非常容易满足），
-        // 整只单位就不能开火**；而 `updateBoosting()` 的
+        // **只要 type.canBoost 且"离地"，整只单位就不能开火**；而 `updateBoosting()` 的
         // `shouldBoost = boost || onSolid() || (isFlying() && !canLand())`
-        // 还会让带助推的单位自己反复升空（撞到实心方块、或悬在别的落地单位上方时 canLand=false
-        // → 一直助推）→ 越升越高、永远 airborne。
-        // 巨兽的飞行模型是它**自己推导**的（有飞行成员才飞、其余一律落地，见 update()），
-        // 不需要原版这套"助推冲刺"：留着它的后果就是用户报的
-        // "陆辅（带助推）一合体就变内鬼"、"在空中时整个巨兽都不能攻击了"、
-        // "组了空军后固定飞天、整个巨兽直接瘫痪"。所以派生类型恒为 canBoost=false。
-        ct.canBoost = false;
+        // 还会让带助推的单位自己反复升空 → 越升越高、永远 airborne。
+        // 当年"组了空军后固定飞天、整个巨兽瘫痪"就是 canFly 的编组继承了 canBoost 引起的。
+        //
+        // 但用户 2026-09-27 明确要求："canBoost=true 的陆军合体后要能助推" ——
+        // 地面巨兽不会自己飞天（canFly=false，update() 里也不再把它的高度按回 0），
+        // 助推完全走原版 PlayerComp/updateBoosting 那套（按下升空、松开落地），
+        // 落地就能开火，没有当年那条坑。所以：**有 canBoost 成员 且 整组不能飞** 才继承。
+        ct.canBoost = anyBoostMember && !ct.flying;
         // range/maxRange 这里只给个兜底：真正的值在 rebuildMounts()（非静态、能读实例状态）
         // 里按"实测武器射程 + 枪口到中心距离"算好覆盖（compTypeFor 是静态方法，读不到实例字段）。
         ct.range = 260f;
@@ -2170,6 +2172,10 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             elevation = 1f;
             return;
         }
+        // 【地面助推巨兽】canBoost 编组（纯地面）的高度交给原版助推那套
+        // （PlayerComp / updateBoosting：按下升空、松开落地），这里再按回 0 就会和助推打架，
+        // 表现就是"按了助推也不动"（用户报的）。
+        if(type.canBoost) return;
         if(elevation != target){
             elevation = arc.math.Mathf.approachDelta(elevation, target, 0.05f);
         }

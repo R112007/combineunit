@@ -57,6 +57,17 @@ public class MegaEnvTest implements ApplicationListener{
         return sb.toString().trim();
     }
 
+    /** 清掉派生类型缓存，保证改了成员的 canBoost 之后重新推导（测试专用）。 */
+    static void clearCompTypeCache(){
+        try{
+            Class<?> mega = Class.forName("combineunit.units.mega.MegaUnitEntity", true, ml);
+            java.lang.reflect.Field f = mega.getDeclaredField("compTypeCache");
+            f.setAccessible(true);
+            Object m = f.get(null);
+            if(m instanceof arc.struct.ObjectMap<?, ?> om) om.clear();
+        }catch(Throwable t){ System.out.println("[ME] 清 compTypeCache 失败: " + t); }
+    }
+
     static Unit mergeAt(Class<?> mergeCls, float x, float y, UnitType... types){
         try{
             Seq<Unit> units = new Seq<>();
@@ -194,6 +205,30 @@ public class MegaEnvTest implements ApplicationListener{
             System.out.println("[ME] 塞普罗编组（对照组）: 巨兽 envDisabled=" + serpulo.type.envDisabled
                 + " supportsEnv=" + supportsEnv(serpulo.type, erekirEnv)
                 + "（原版 dagger 自己 envDisabled=" + UnitTypes.dagger.envDisabled + "）");
+        }
+
+        // ===== 助推（canBoost）继承（用户 2026-09-27："canBoost=true 的陆军合体后不能助推"）=====
+        // 纯地面编组 → 继承 canBoost；带飞行成员 → 不继承（当年"飞天不能开火"那条坑）。
+        {
+            // 上面把 env 换成了埃里克尔（塞普罗单位会环境死亡），这里换回地球环境再合体
+            Vars.state.rules.env = mindustry.world.meta.Env.terrestrial;
+            UnitType ga = UnitTypes.dagger, gb = UnitTypes.crawler, fly = UnitTypes.flare;
+            boolean oa = ga.canBoost, ob = gb.canBoost;
+            ga.canBoost = true; gb.canBoost = true;
+            clearCompTypeCache();
+            Unit megaG = mergeAt(mergeCls, px, py + 96f, ga, gb);
+            ga.canBoost = oa; gb.canBoost = ob;
+            System.out.println("[ME] 地面 canBoost 编组: 巨兽 canBoost="
+                + (megaG == null ? "null" : megaG.type.canBoost));
+            check("纯地面 canBoost 编组：巨兽继承助推", megaG != null && megaG.type.canBoost);
+
+            ga.canBoost = true;
+            clearCompTypeCache();
+            Unit megaF = mergeAt(mergeCls, px, py + 144f, ga, fly);
+            ga.canBoost = oa;
+            System.out.println("[ME] 含飞行成员编组: 巨兽 canBoost="
+                + (megaF == null ? "null" : megaF.type.canBoost));
+            check("带飞行成员的编组不继承助推（不会固定飞天/不能开火）", megaF != null && !megaF.type.canBoost);
         }
 
         System.out.println("[ME] RESULT " + (fail==0?"ALL PASS":(fail+" FAILED")) + " (pass="+pass+")");
