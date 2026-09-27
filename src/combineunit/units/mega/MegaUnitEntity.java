@@ -364,12 +364,7 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         // 控制器为 null 的单位在指挥模式里会被原版每帧踢出框选集
         // （DesktopInput: selectedUnits.removeAll(u -> !u.allowCommand())），
         // 表现就是"巨兽变成点不动任何指令的幽灵单位、只能附身操控"。
-        if(controller() == null){
-            try{
-                resetController();
-            }catch(Throwable ignored){
-            }
-        }
+        ensureController();
 
         // 【只在构成变化、或数组被原版换掉时才重建挂载】原版每个同步快照都会 setType →
         // "按 type 重建 mounts/abilities"（巨兽占位类型的 weapons/abilities 是空的），
@@ -723,12 +718,7 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         drag = type.drag;
         armor = type.armor;
         hitSize = type.hitSize;
-        if(controller() == null){
-            try{
-                controller(type.createController(self()));
-            }catch(Throwable ignored){
-            }
-        }
+        ensureController();
     }
 
     /**
@@ -2087,6 +2077,12 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
      */
     @Override
     public void update(){
+        // 【别让 controller 为空】原版 UnitEntity.remove() 会调 controller.removed(this)，
+        // controller 为 null 时一旦这只巨兽死亡/被清掉就是 NPE 直接崩游戏
+        //（用户崩溃报告：MegaUnitEntity.update → UnitEntity.update → Call.unitDestroy →
+        //  UnitEntity.remove → NPE: "this.controller" is null）。
+        // 巨兽是自定义实体，客户端从快照建实体、或换派生类型时都可能没有控制器。
+        ensureController();
         super.update();
         // 身体部件（腿/机甲腿/履带/爬虫身）的动画：原版是实体组件在 super.update() 里跑的，
         // 巨兽没有这些组件，在这里按代表类型的部件种类自己驱动（绘制见 MegaUnitType）。
@@ -2113,6 +2109,34 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         if(elevation != target){
             elevation = arc.math.Mathf.approachDelta(elevation, target, 0.05f);
         }
+    }
+
+    /**
+     * 兜底控制器：控制器为 null 的单位在原版里处处会炸 ——
+     * {@code UnitEntity.remove()}（死亡/被清）会调 {@code controller.removed(this)}，
+     * 直接 NPE 崩游戏（用户崩溃报告里就是这个：MegaUnitEntity.update → UnitEntity.update →
+     * Call.unitDestroy → UnitEntity.remove → "this.controller" is null）；
+     * 指挥模式里也会被原版每帧踢出框选（"点不动任何指令的幽灵单位"）。
+     */
+    public void ensureController(){
+        if(controller() != null) return;
+        try{
+            mindustry.entities.units.UnitController c = type == null ? null : type.createController(self());
+            if(c == null) c = new mindustry.ai.types.CommandAI();
+            controller(c);
+        }catch(Throwable t){
+            try{
+                controller(new mindustry.ai.types.CommandAI());
+            }catch(Throwable ignored){
+            }
+        }
+    }
+
+    @Override
+    public void remove(){
+        // 原版 remove() 会调 controller.removed(this)：这一步之前必须有控制器（见 ensureController）。
+        ensureController();
+        super.remove();
     }
 
     /**
