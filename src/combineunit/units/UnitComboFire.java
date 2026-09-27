@@ -363,6 +363,12 @@ public class UnitComboFire{
         Effect.shake(w.shake, w.shake, bulletX, bulletY);
         mount.recoil = 1f;
         if(w.recoils > 0){
+            // 【别指望 mount.recoils 已经建好】原版是在 Weapon.update() 里
+            // `if(mount.recoils == null) mount.recoils = new float[recoils];` 现建的，
+            // 而这里借的是**同组成员的挂座**：成员已经被合体收进巨兽体内（不再走自己的
+            // Weapon.update）时这个数组一直是 null —— 直接写就是 NPE 崩游戏
+            //（用户崩溃报告：UnitComboFire.spawnBullet → "mount.recoils is null"）。
+            if(mount.recoils == null) mount.recoils = new float[Math.max(w.recoils, 1)];
             mount.recoils[mount.barrelCounter % w.recoils] = 1f;
         }
     }
