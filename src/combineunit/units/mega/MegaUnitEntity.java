@@ -326,6 +326,12 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             // 这里用手上还留着的代表类型（上次推导的结果，或成员块里带来的提示）按
             // "单成员构成"推一个派生类型，至少保住图标/体型/物品容量/挖矿与建造速率。
             if(dominant != null) fallbackDerive(dominant);
+            // 【绝不能把 type 留在 null】客户端从快照建实体、或成员表整块读不出来时，
+            // dominant 也可能是 null，于是 type 一直是 null —— 原版物理线程每帧都会读
+            // unit.type.allowLegStep（UnitEntity.collisionLayer ← PhysicsProcess.begin），
+            // 直接 NPE 崩游戏（用户安卓崩溃报告：collisionLayer → PhysicsProcess.begin，
+            // 多人游戏里有人合体时爆的）。这里兜到巨兽占位类型上。
+            if(type == null) type = UnitComboMerge.megaGround;
             return;
         }
 
@@ -709,6 +715,9 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
      */
     @Override
     public void setType(UnitType type){
+        // 原版有些路径会传 null（客户端快照里类型 id = -1 就是 null）。留 null 的下场见
+        // collisionLayer 的说明：物理线程当帧 NPE 崩游戏。
+        if(type == null) type = UnitComboMerge.megaGround;
         if(members.isEmpty()){
             super.setType(type);
             return;
@@ -1176,6 +1185,28 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
     @Override
     public float range(){
         return megaRange;
+    }
+
+    /**
+     * 【防崩】碰撞层：原版实现第一句就是 {@code type.allowLegStep} —— type 为 null 时
+     * 物理线程（PhysicsProcess.begin，每帧都会重建所有单位的碰撞体）直接 NPE 崩游戏。
+     * 用户安卓崩溃报告：
+     * <pre>
+     * java.lang.NullPointerException: Attempt to read from field 'boolean mindustry.type.UnitType.allowLegStep'
+     *   at mindustry.gen.UnitEntity.collisionLayer(UnitEntity.java:3)
+     *   at mindustry.async.PhysicsProcess.begin(PhysicsProcess.java:176)
+     * </pre>
+     * 巨兽是自定义实体：客户端从快照建实体、构成读不出来时 type 可能一直是 null。
+     * 这里兜到占位类型；万一还出问题就退回"地面层"，绝不能把异常抛给物理线程。
+     */
+    @Override
+    public int collisionLayer(){
+        try{
+            if(type == null) type = UnitComboMerge.megaGround;
+            return super.collisionLayer();
+        }catch(Throwable t){
+            return mindustry.async.PhysicsProcess.layerGround;
+        }
     }
 
     /**
