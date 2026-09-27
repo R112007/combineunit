@@ -1240,8 +1240,39 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
      */
     @Override
     public void writeSync(Writes write){
-        super.writeSync(write);
+        withCappedMounts(() -> super.writeSync(write));
         writeMembersSync(write);
+    }
+
+    /**
+     * 原版 {@code TypeIO.writeMounts} 用的是**一个字节**写挂载数量
+     * （{@code writes.b(mounts.length)}），而巨兽每个成员会派生**两个**挂载
+     * （左右对称各一个）：成员 ≥ 64 时数量就超过 127、字节回绕成负数 ——
+     * 客户端那边 {@code readMounts} 见到负数一个挂载都不读，整条快照流当场错位，
+     * readMembers 读到的东西也就不是成员块了。
+     *
+     * <p>表现就是用户报的："**客户端无法看见过多单位组合的组合体**"
+     * （实测：60 只 = 120 挂载 → 正常；120 只 = 240 挂载 → 客户端重建出 0 个成员、
+     * 整只巨兽在客户端不存在；同一包后面还没读的实体也一起丢）。
+     *
+     * <p>修法：只在**写出**（快照/存档）时把挂载表临时裁到 127 以内，走完原版
+     * writeMounts 再换回来 —— 服务器内存里的巨兽挂载一个不少（伤害/火力不变），
+     * 客户端也只是"前 127 个挂载拿到瞄准/开火状态"，其余挂载由构成自己派生（只影响这几件武器的朝向观感）。
+     */
+    private static final int MAX_SYNC_MOUNTS = 127;
+
+    private void withCappedMounts(Runnable writeSuper){
+        WeaponMount[] full = mounts;
+        if(full != null && full.length > MAX_SYNC_MOUNTS){
+            WeaponMount[] capped = new WeaponMount[MAX_SYNC_MOUNTS];
+            System.arraycopy(full, 0, capped, 0, MAX_SYNC_MOUNTS);
+            mounts = capped;
+        }
+        try{
+            writeSuper.run();
+        }finally{
+            mounts = full;
+        }
     }
 
     @Override
@@ -1266,7 +1297,9 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
     /** 存档：同样在原版字段之后追加成员列表。 */
     @Override
     public void write(Writes write){
-        super.write(write);
+        // 存档同理：原版 write 也走 TypeIO.writeMounts（同样是一个字节的数量），
+        // 成员 ≥ 64 时不裁就会把整个实体的存档字节写歪。
+        withCappedMounts(() -> super.write(write));
         writeMembers(write);
     }
 

@@ -35,5 +35,9 @@ proot 是单线程 ptrace 事件循环，几个常驻线程 + 高频 futex 就�
 
 ## 其他
 
+- **同时兼容手机（安卓）和电脑**：只用两端都有的 API；触摸端要有替代入口（快捷键/右键/Esc 都要有可点按的替代，
+  取消也只能靠触摸完成）；交付必须用 `./gradlew --offline deploy`（含 `classes.dex`）；
+  `uiIcon/region` 要兜底、**`localizedName` 与玩家名绝不为 null**（null 会让小地图 `GlyphLayout.setText` 闪退，
+  见 `~/sd/questions/crash_1790334593570.txt`）。详见 `/root/.codex/AGENTS.md` 那一节。
 - 临时探针/调试日志（`[dbg]`、`System.out.print`）用完就删，交付脚本会 grep 检查。
 - 提交信息用中文，说清"根因 + 改法"。

@@ -126,18 +126,14 @@ public class UnitComboFire{
             WeaponMount mount = mounts[i];
 
             if(w.bullet == null) continue;
-            if(w instanceof mindustry.type.weapons.RepairBeamWeapon) continue; // 维修光束只修己方建筑/单位，不代打
-            // 【治疗类武器一律不代打】包括"伤害+治疗双用"的（vela 的主力激光就是 healPercent + collidesTeam）：
-            // 借给别的单位后，那台单位会顶着自己的位置/目标发射这束治疗武器 ——
-            // 表现就是用户报的"dagger 和 vela 普通组合后会发射 vela 治疗武器的子弹"，
-            // 而且那束激光的命中范围（碰撞箱）跟借入方自己的武器完全不是一回事。
-            // 想用治疗武器就自己开火；代打只搬纯输出武器。
-            // 【治疗类武器一律不代打】包括「伤害+治疗双用」的（vela 的主力激光就是 healPercent + collidesTeam）：
-            // 借给别的单位后，那台单位会顶着自己的位置/目标发射这束治疗武器 ——
-            // 表现就是用户报的「dagger 和 vela 普通组合后会发射 vela 治疗武器的子弹」，
-            // 而且那束激光的命中范围（碰撞箱）跟借入方自己的武器完全不是一回事。
-            // 想用治疗武器就自己开火；代打只搬纯输出武器。
-            if(w.bullet.heals()) continue;
+            // 【修复类的两把要分开看】用户 2026-09-25 的口径：
+            //   · "修复"（维修光束 / 只治疗的弹体）不代打 —— 它们只修己方建筑/单位，
+            //     借给别的单位后是顶着借入方的位置乱修，本来就不该发射；
+            //   · "激光"要照常代打 —— vela 的主力武器就是"持续激光 + healPercent + collidesTeam"
+            //     （打敌人顺便治己方），以前按 heals() 一刀切把它也挡了，用户报
+            //     "会发射修复武器的子弹、不发射激光"，现在只挡"治疗且没有伤害"的。
+            if(w instanceof mindustry.type.weapons.RepairBeamWeapon) continue;   // 维修光束：只修，不代打
+            if(w.bullet.heals() && w.bullet.damage <= 0f) continue;              // 纯治疗弹：不代打
             if(w.shoot.firstShotDelay > 0f && !w.continuous) continue; // 充能型不支持（持续型单独走光束逻辑）
             if(w.bullet.killShooter && mount.totalShots > 0 && !w.continuous) continue;
 

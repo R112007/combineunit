@@ -2,19 +2,22 @@ package combineunit.dbg;
 import arc.*; import arc.backend.headless.HeadlessApplication; import arc.struct.*; import arc.util.Log;
 import mindustry.*; import mindustry.content.*; import mindustry.core.*; import mindustry.game.*; import mindustry.gen.*;
 import mindustry.maps.Map; import mindustry.mod.*; import mindustry.net.Net; import mindustry.ui.Fonts; import mindustry.world.*;
+import mindustry.type.Weapon;
 
 /**
- * 用户报："dagger 和 vela 普通组合后会发射 vela 治疗武器的子弹，而且碰撞箱好像变了"。
+ * 用户 2026-09-25 口径（第二版）：单位组合（不融合）之后
+ *   · vela 的**主力激光**（持续激光，healPercent + collidesTeam，同时有伤害）**应该照常代打**；
+ *   · vela 的**维修光束**（RepairBeamWeapon，只修不打的"修复武器"）**不应该发射**。
  *
- * 根因：组合火力共享（{@link combineunit.units.UnitComboFire}）会把组内空闲成员的武器借给正在开火的成员代打。
- * 原来的过滤只排除"纯治疗弹"（{@code bullet.heals() && damage <= 0}），于是 vela 那种
- * "伤害 + 治疗双用"的主力激光（healPercent + collidesTeam）也会被借出去 ——
- * dagger 开火时就从自己身上发射 vela 的治疗激光，看着就是"普通单位在发射治疗武器的子弹"，
- * 而且那束激光的命中范围/形状跟 dagger 自己的枪完全不是一回事（"碰撞箱好像变了"）。
+ * 历史：第一版把"治疗类武器"一刀切排除（{@code bullet.heals()} 就直接 continue），
+ * 结果 vela 的激光也被挡了 —— 用户报"会发射修复武器的子弹、但不发射激光，这是不合理的"。
+ * 现在 {@link combineunit.units.UnitComboFire#lend} 的过滤是：
+ *   {@code RepairBeamWeapon 跳过} + {@code bullet.heals() && bullet.damage <= 0 才跳过}。
  *
  * 这个测试：dagger + vela 编成组合 → 逼 dagger 开火 60 tick →
- *   1) 场上不能出现 vela 那种"带治疗"的弹体；
- *   2) 同时 dagger 自己的普通子弹必须还在（证明场景真的在开火，不是假过）。
+ *   1) 必须出现 vela 的激光弹体（带治疗且带伤害的那种）；
+ *   2) 不能出现维修光束的弹体（RepairBeamWeapon 的那颗）；
+ *   3) dagger 自己的普通子弹必须还在（证明场景真的在开火，不是假过）。
  */
 public class ComboFireSupportTest implements ApplicationListener{
     static String dataDir="/tmp/mp_cj/data";
@@ -105,7 +108,17 @@ public class ComboFireSupportTest implements ApplicationListener{
 
         // 逼 dagger 开火（朝着远处靶子方向，手动瞄具武器不看目标也能打），跑 60 tick
         // 逐帧统计 dagger 自己"发出过"的弹体（子弹寿命很短，只查最后那一帧会漏）
-        int healing = 0, normal = 0;
+        // 维修光束的弹体类型（应该一发都不出现）
+        mindustry.entities.bullet.BulletType repairBullet = null, laserBullet = null;
+        for(Weapon w : vela.type.weapons){
+            if(w instanceof mindustry.type.weapons.RepairBeamWeapon) repairBullet = w.bullet;
+            else if(w.bullet != null && w.bullet.heals() && w.bullet.damage > 0f) laserBullet = w.bullet;
+        }
+        System.out.println("[CF] vela 武器: 激光弹体=" + (laserBullet == null ? "null" : laserBullet.getClass().getName())
+            + " 维修光束弹体=" + (repairBullet == null ? "null" : repairBullet.getClass().getName()));
+        check("找得到 vela 的激光与维修光束（免得断言假过）", laserBullet != null && repairBullet != null);
+
+        int healing = 0, normal = 0, repair = 0, laser = 0;
         int shotsBefore = totalShots(dagger);
         System.out.println("[CF] 测量前: dagger 存活=" + dagger.isValid() + " 会开火=" + dagger.isShooting()
             + " 敌方存活=" + enemy.isValid() + " 血=" + (int)enemy.health()
@@ -120,12 +133,16 @@ public class ComboFireSupportTest implements ApplicationListener{
                 if(b == null || b.type == null || b.owner != dagger) continue;
                 if(b.type.heals()) healing++;
                 else if(b.type.damage > 0f) normal++;
+                if(repairBullet != null && b.type == repairBullet) repair++;
+                if(laserBullet != null && b.type == laserBullet) laser++;
             }
         }
         int shotsAfter = totalShots(dagger);
         System.out.println("[CF] 60 tick 内 dagger 发出的弹体: 带治疗帧数=" + healing + " 普通伤害帧数=" + normal
+            + "（其中 vela 激光帧数=" + laser + " 维修光束帧数=" + repair + "）"
             + "（射击次数 " + shotsBefore + " → " + shotsAfter + "，场上弹体总数=" + Groups.bullet.size() + "）");
-        check("没有借出 vela 的治疗类武器（带治疗的弹体必须为 0）", healing == 0);
+        check("vela 的激光照常代打（激光弹体帧数 " + laser + " > 0）", laser > 0);
+        check("维修光束不发射（维修弹体必须为 0，实际 " + repair + "）", repair == 0);
         check("dagger 自己的武器照常开火（射击次数增加，证明场景有效）", shotsAfter > shotsBefore);
 
         System.out.println("[CF] RESULT " + (fail==0?"ALL PASS":(fail+" FAILED")) + " (pass="+pass+")");

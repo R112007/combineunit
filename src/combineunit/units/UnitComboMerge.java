@@ -341,6 +341,45 @@ public class UnitComboMerge{
         // 走地面/水面的碰撞与地形系数，看着像"合体了却不是飞行单位"）
         // 能不能飞按"组里有飞行成员就能飞"（用户 2026-09-25 的口径），见 canFly()
         mega.elevation(mega.canFly() ? 1f : 0f);
+
+        // 【出生点不许在墙里】原版 UnitComp.update 有一条硬规则：
+        //   //kill entities on tiles that are solid to them
+        //   if(tile != null && !canPassOn()) { if(type.canBoost) elevation = 1f; else kill(); }
+        // 而巨兽原来是直接生成在成员坐标的**平均点**：两个单位隔着一堵墙融合（或者站在只有
+        // 一格宽的空隙、墙脚里）时，平均点就落在实心格里 —— 巨兽当帧就被原版 kill 掉，
+        // 玩家看到的就是"融合后的出生点在墙里就被闷死"。
+        // 这里用解体同一套判定（canPlace：地形/实心方块/溺水）挑落点：
+        // 原地点合法就用原地点；不合法就按解体那套螺旋外扩找一个最近的可站格；
+        // 再不行退回"某个成员自己站得住的位置"（成员本来就在合法格上）。
+        // 会飞的巨兽 solidity()==null → canPass 恒真，落点不会被动（它们本来就能悬在墙/水上方）。
+        try{
+            if(!canPlace(mega, mega.x, mega.y)){
+                Vec2 out = new Vec2();
+                boolean found = false;
+                // ① 先试成员自己站的位置（它们本来就在合法格上，落点最贴近原地）
+                for(Unit m : members){
+                    if(m != null && canPlace(mega, m.x, m.y)){ out.set(m.x, m.y); found = true; break; }
+                }
+                // ② 再按解体那套螺旋外扩找最近的可站格
+                if(!found) found = findDropPos(mega, mega, mega.x, mega.y, out);
+                // ③ 都没有就退回第一个成员的位置（宁可挤一点也别被原版 kill 掉）
+                if(!found){
+                    for(Unit m : members){
+                        if(m != null){ out.set(m.x, m.y); found = true; break; }
+                    }
+                }
+                if(found){
+                    Log.info("[combineunit] 融合落点 @,@ 不合法（在实心格/液体上），已挪到 @,@",
+                        (int)(mega.x / mindustry.Vars.tilesize), (int)(mega.y / mindustry.Vars.tilesize),
+                        (int)(out.x / mindustry.Vars.tilesize), (int)(out.y / mindustry.Vars.tilesize));
+                    mega.set(out.x, out.y);
+                }else{
+                    Log.warn("[combineunit] 融合落点不合法，附近也找不到合法落脚点（巨兽可能会被原版清掉）");
+                }
+            }
+        }catch(Throwable t){
+            Log.err("[combineunit] 融合落点校正失败（照旧出生，不影响融合本身）", t);
+        }
         mega.add();
 
         Fx.unitDrop.at(mega.x, mega.y);

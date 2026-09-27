@@ -36,6 +36,12 @@ public class Main extends Mod {
     if (!Vars.headless)
       UnitComboBind.register();
 
+    // 防闪退兜底：玩家名字为 null 时，原版小地图画玩家名字会直接 NPE 闪退
+    //（crash_1790334593570.txt）。这段是游戏自己的代码改不了，我们保证数据侧不为空。
+    // 纯客户端的事（服务端没有小地图），别在无头端白跑。
+    if (!Vars.headless)
+      UnitComboGuard.register();
+
     // 组合巨兽：单位组（或一批相邻单位）可融合为单一巨兽——血量/护甲/护盾/武器/能力
     // 全部叠加保留，贴图取数量最多的成员类型并按综合 hitSize 缩放，飞行/海军形态按
     // 成员构成判定；点选巨兽可随时解体。类型与实体 ID 登记（固定槽 250）
