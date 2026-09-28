@@ -904,6 +904,10 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
                 }else{
                     if(UnitComboMerge.isNaval(t)) n = true;
                     else g = true;
+                    // 【地面 canBoost 成员的引擎也要参考】助推时（elevation>0）原版会画尾焰，
+                    // 但没有飞行成员时以前不会把"带助推的地面成员"当引擎样板 → 引擎表空 → 助推没尾焰
+                    // （用户 2026-09-28 报的"助推的时候没有画引擎"）。
+                    if(t.canBoost && (engRef == null || t.hitSize > engRef.hitSize)) engRef = t;
                 }
             }
             // 【能不能飞】用户 2026-09-25 改的口径：**有飞行成员就能飞**（旧口径是两边 hitSize
@@ -1020,6 +1024,9 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         // 助推完全走原版 PlayerComp/updateBoosting 那套（按下升空、松开落地），
         // 落地就能开火，没有当年那条坑。所以：**有 canBoost 成员 且 整组不能飞** 才继承。
         ct.canBoost = anyBoostMember && !ct.flying;
+        // 助推时要画尾焰：原版 drawEngines 只在 elevation>0 时画，所以地面 canBoost 编组
+        // 也必须把引擎表建出来（hoverEngines 只用于 rebuildEngines 的"要不要建引擎"，不影响寻路）。
+        if(ct.canBoost) ct.hoverEngines = true;
         // range/maxRange 这里只给个兜底：真正的值在 rebuildMounts()（非静态、能读实例状态）
         // 里按"实测武器射程 + 枪口到中心距离"算好覆盖（compTypeFor 是静态方法，读不到实例字段）。
         ct.range = 260f;

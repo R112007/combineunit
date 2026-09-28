@@ -219,8 +219,11 @@ public class MegaEnvTest implements ApplicationListener{
             Unit megaG = mergeAt(mergeCls, px, py + 96f, ga, gb);
             ga.canBoost = oa; gb.canBoost = ob;
             System.out.println("[ME] 地面 canBoost 编组: 巨兽 canBoost="
-                + (megaG == null ? "null" : megaG.type.canBoost));
+                + (megaG == null ? "null" : megaG.type.canBoost)
+                + " 引擎数=" + (megaG == null ? "-" : megaG.type.engines.size));
             check("纯地面 canBoost 编组：巨兽继承助推", megaG != null && megaG.type.canBoost);
+            check("纯地面 canBoost 编组：建了引擎表（助推时才有尾焰可画）",
+                megaG != null && megaG.type.engines.size > 0);
 
             ga.canBoost = true;
             clearCompTypeCache();
