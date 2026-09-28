@@ -2194,9 +2194,34 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
      * 直接 NPE 崩游戏（用户崩溃报告里就是这个：MegaUnitEntity.update → UnitEntity.update →
      * Call.unitDestroy → UnitEntity.remove → "this.controller" is null）；
      * 指挥模式里也会被原版每帧踢出框选（"点不动任何指令的幽灵单位"）。
+     *
+     * <p>【半成品控制器也要修】只判 {@code controller() != null} 查不出"控制器在、但没挂 unit"
+     * 这种状态：网络读回来的 {@code CommandAI}（{@code TypeIO.readController} 直接赋值、还没走
+     * 原版 {@code afterSync}）、或读快照中途抛异常留下的控制器都会这样。这时
+     * {@code CommandAI.updateUnit} 会把自己的 {@code unit}（null）传给命令控制器
+     * （{@code rebuild}/{@code assist} → {@code BuilderAI}），而 {@code BuilderAI.useFallback()}
+     * 第一句就读 {@code unit.team} —— 直接 NPE 崩游戏：
+     * <pre>
+     * NullPointerException: Attempt to read from field 'mindustry.game.Team mindustry.gen.Unit.team'
+     *   at mindustry.ai.types.BuilderAI.useFallback
+     *   at mindustry.entities.units.AIController.updateUnit
+     *   at mindustry.ai.types.CommandAI.updateUnit
+     *   at mindustry.gen.UnitEntity.update
+     *   at combineunit.units.mega.MegaUnitEntity.update
+     * </pre>
+     * 这里按原版 {@code UnitComp.controller(UnitController)} 的口径
+     * （{@code if(controller.unit() != self()) controller.unit(self())}）把 unit 补回去。
      */
     public void ensureController(){
-        if(controller() != null) return;
+        mindustry.entities.units.UnitController cur = controller();
+        if(cur != null){
+            // 控制器在，但没挂 unit（或挂错了）→ 原地补回自己，避免命令控制器拿 null 去读 team。
+            try{
+                if(cur.unit() != self()) cur.unit(self());
+            }catch(Throwable ignored){
+            }
+            return;
+        }
         try{
             mindustry.entities.units.UnitController c = type == null ? null : type.createController(self());
             if(c == null) c = new mindustry.ai.types.CommandAI();

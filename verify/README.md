@@ -25,7 +25,8 @@ for t in SanityCheck MegaEnvTest MegaFieldTest MegaWaterTest MegaHoverTest MegaH
          MegaLegsTest MegaWeaponLayoutTest MegaPlaceholderTest MegaMiningTest MegaPayloadTest MegaTankTest MegaBoostTest \
          MegaPossessLoadTest ScriptModCompatTest MegaFlightRuleTest \
          MegaStatSumTest MegaSurviveTest MegaSyncTest MegaGhostMemberTest MegaClipSizeTest \
-         MegaGhostTest ComboFireSupportTest; do
+         MegaGhostTest ComboFireSupportTest MegaNullControllerTest MegaNullTypeTest \
+         MegaBuilderAiNpeTest CoreUnitSyncTest; do
   verify/run-headless.sh mx /tmp/mp_unit/data combineunit.dbg.$t
 done
 ```
@@ -58,6 +59,7 @@ done
 | `ComboFireSupportTest`（+ combine 仓库的 `combine.dbg.MegaRepairFireTest`） | 借火只许打敌方目标：维修/建造武器跟踪的是**己方建筑**、玩家长按维修时瞄准点也压在自家房子上，照着打就会把同组其他成员的武器引到己方建筑上（用户报的"mega 武器去修复建筑的时候，其他武器的开火会损坏己方建筑"）。实测修前己方半血墙被借火打 14 发，修后己方目标/瞄准点 0 发、敌方目标照常 14 发；巨兽自己 `groupable=false`（不参与借火） |
 | `MegaClipSizeTest` | 给巨兽排建造计划后 `clipSize` 不崩（视口裁剪用） |
 | `MegaGhostTest` | 合体后不是本地幽灵、控制器/指令表/姿态齐全、移动指令生效、解体后成员回世界、编组入口（comboId）行为 |
+| `MegaBuilderAiNpeTest` | 用户安卓崩溃 `BuilderAI.useFallback` 读 `unit.team` NPE（`CommandAI.updateUnit → 命令控制器 BuilderAI`）：巨兽的控制器是"半成品"（`controller != null` 但 `unit == null`，网络读回来的 CommandAI / 读快照中途异常的残留）时，挂着成员带来的 `rebuild`/`assist` 建造指令（poly 这类工程单位）那一帧必崩。判定：这种状态 tick 不抛异常、且当帧把控制器挂回巨兽（`ensureController` 不再只判 `controller == null`）。修前 2 项 FAIL（复现同款 NPE），修后 5/5 PASS |
 | `ComboFireSupportTest` | 组合火力共享不借治疗类武器代打（带治疗的弹体必须为 0），自己的武器照常开火 |
 
 约定：`combineunit.dbg.*` 的测试类放在 `verify/tests/`，`run-headless.sh` 会一起编译；
