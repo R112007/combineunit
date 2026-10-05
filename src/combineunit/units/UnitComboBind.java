@@ -43,6 +43,8 @@ public class UnitComboBind{
     private static final ObjectMap<Unit, UnitCommand> prevCmd = new ObjectMap<>();
     /** 检测到组合指令后的开菜单冷却（同步往返期间每帧都能检测到，只开一次）。 */
     private static float lastDetect = -1f;
+    /** 菜单里点了会改变内容的按钮：下一帧才重画（见 tick 里"别在事件派发里重画弹窗"）。 */
+    private static boolean rebuildQueued = false;
 
     /** 在 mod init 时调用（无头服务端跳过）。 */
     public static void register(){
@@ -66,6 +68,16 @@ public class UnitComboBind{
         // 左键不再直接弹菜单——组合入口只有命令面板的"组合"按钮（见 detectCommandButton），
         // 避免框选/点选单位做别的操作时误触。这里只做面板指令检测和选中集有效性维护。
         detectCommandButton();
+
+        // 【别在事件派发里重画弹窗】菜单里的按钮回调（arc 的 ClickListener）还在 input 派发栈上，
+        // 当场 dialog.hide() + cont.clear() 会把"正在派发的那个按钮"（以及它外面的 pane）从场景里摘掉 ——
+        // arc 的 Element.notify 接着会 getScene().addTouchFocus(...) 直接 NPE 崩游戏
+        // （用户 2026-09-29 的安卓/触屏崩溃报告；同一类问题在 combine 的设置列表里也是这么修的）。
+        // 所以只置一个标记，下一帧再做。
+        if(rebuildQueued){
+            rebuildQueued = false;
+            if(dialog != null && dialog.isShown()) rebuildDialogNow();
+        }
 
         if(picked != null && (
             picked.team() != Vars.player.team()
@@ -190,16 +202,29 @@ public class UnitComboBind{
         dialog.cont.clear();
         dialog.buttons.clear();
 
-        // ---- 组合巨兽：只提供解体 ----
+        // ---- 组合巨兽：解体 / 追加炮台 / 释放炮台 ----
         if(u instanceof combineunit.units.mega.MegaUnitEntity mega){
             int n = mega.memberCount();
+            int tn = mega.hasTurrets() ? mega.bay().size() : 0;
+            String turretLine = tn > 0
+                ? "    炮台 " + tn + " 座（" + mega.bay().composition() + "）"
+                : "    炮台 0 座（合体时自动吸收脚下的炮台）";
             dialog.cont.add("组合巨兽    " + n + " 名成员（" + UnitComboMerge.composition(u) + "）"
-                + "    血量 " + (int)(u.healthf() * 100) + "%").padBottom(8f).row();
+                + turretLine + "    血量 " + (int)(u.healthf() * 100) + "%").padBottom(8f).row();
+            // 触屏/鼠标都能点：追加与释放都走按钮，不依赖任何快捷键
+            dialog.cont.button("追加附近炮台", () -> {
+                UnitComboMerge.requestAbsorbTurrets(u);
+                rebuildDialog();
+            }).size(260f, 48f).padTop(8f).row();
+            dialog.cont.button("释放全部炮台", () -> {
+                UnitComboMerge.requestReleaseTurrets(u);
+                rebuildDialog();
+            }).disabled(b -> tn == 0).size(260f, 48f).padTop(4f).row();
             dialog.cont.button("解体为成员单位", () -> {
                 UnitComboMerge.requestSplit(u);
                 dialog.hide();
                 picked = null;
-            }).size(260f, 48f).padTop(8f).row();
+            }).size(260f, 48f).padTop(4f).row();
             dialog.addCloseButton();
             dialog.show();
             return;
@@ -269,8 +294,12 @@ public class UnitComboBind{
         dialog.show();
     }
 
-    /** 组合操作后刷新菜单内容（不换弹窗，保持在单位上操作）。 */
+    /** 组合操作后刷新菜单内容（不换弹窗，保持在单位上操作）。**下一帧才真的重画**，见 tick 里的说明。 */
     private static void rebuildDialog(){
+        rebuildQueued = true;
+    }
+
+    private static void rebuildDialogNow(){
         if(dialog == null || !dialog.isShown()) return;
         dialog.hide();
         openDialog();

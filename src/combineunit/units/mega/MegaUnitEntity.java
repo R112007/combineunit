@@ -20,6 +20,7 @@ import mindustry.entities.Leg;
 import mindustry.entities.abilities.Ability;
 import mindustry.entities.units.WeaponMount;
 import mindustry.gen.Crawlc;
+import mindustry.gen.Building;
 import mindustry.gen.Groups;
 import mindustry.gen.Player;
 import mindustry.gen.Legsc;
@@ -180,7 +181,23 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
     /** 被封存的成员。同步/存档时逐条全量内联写出，见 writeSync/readSync/write/read。 */
     private final Seq<UnitPayload> members = new Seq<>();
 
+    /**
+     * 炮台舱：合体时吸收的炮台摆在这只巨兽内部的小 World 里（见 {@link MegaTurretBay}）。
+     * 懒创建 —— 没吃过炮台的巨兽这字段是 null，同步/存档写出空段。
+     */
+    private MegaTurretBay bay;
+
     public MegaUnitEntity(){
+    }
+
+    /** 炮台舱（没有就现建一个；只读判断请用 {@link #hasTurrets()}）。 */
+    public MegaTurretBay bay(){
+        if(bay == null) bay = new MegaTurretBay(this);
+        return bay;
+    }
+
+    public boolean hasTurrets(){
+        return bay != null && !bay.isEmpty();
     }
 
     @Override
@@ -1414,6 +1431,13 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
                 w.str(entityKey(mu));
                 mu.write(w);
             }
+            // 【炮台段写在成员体内部】不能挂在成员块后面当"尾随段"：存档里每个实体是
+            // `int 长度 + 体`（SaveFileReader.writeChunk），读端按长度前进，多读/少读一个字节
+            // 就会把**后面所有实体**读歪。老存档（发布版 9/29，有成员块、没有炮台段）读到这里
+            // 正好是实体末尾 —— 尾随段会读到下一个实体的长度前缀（1 个字节）→ 整档读不进去。
+            // 放进成员体（本身有长度前缀、按长度整块读进内存）后：老存档读不到炮台段只是这里
+            // 提前 EOF，被吞掉保持空舱；新存档两端对称。
+            writeTurretsInner(w, true);
             body = bos.toByteArray();
         }catch(Throwable t){
             Log.err("[combine] 组合巨兽成员序列化失败（本次按无成员写出）", t);
@@ -1422,6 +1446,40 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         write.b(MEMBER_TAG);
         write.i(body.length);
         write.b(body);
+    }
+
+    /**
+     * 炮台舱的序列化段：标记 + 长度 + 体（见 {@link MegaTurretBay#write}）。
+     * 写在**成员体内部**（见上面说明），快照只发构成（客户端照着重建本地副本自己模拟），
+     * 存档多写血量与弹药。空舱也写一个完整段（tag + len + 体），读端格式才统一。
+     */
+    private void writeTurretsInner(Writes w, boolean full){
+        if(bay == null){
+            w.b((byte)0x54);
+            w.i(3);
+            w.b(new byte[]{1, 0, 0});
+            return;
+        }
+        bay.write(w, full);
+    }
+
+    /** 从**成员体**里读炮台段；老存档（没有这一段）会提前 EOF，吞掉当空舱。 */
+    private void readTurretsInner(Reads r){
+        if(bay == null) bay = new MegaTurretBay(this);
+        try{
+            bay.read(r);
+        }catch(Throwable t){
+            // 读不到（老存档没有炮台段；或坏数据）不是错误：保持上一份/空舱即可，
+            // 绝不能让异常冒到实体流外面。老存档就是"读到成员体末尾"的纯 EOF，别刷栈。
+            Throwable c = t;
+            boolean eof = false;
+            while(c != null){
+                if(c instanceof java.io.EOFException){ eof = true; break; }
+                c = c.getCause();
+            }
+            if(eof) Log.warn("[combine] 巨兽存档没有炮台段（老存档/未吸收），按空舱");
+            else Log.err("[combine] 巨兽炮台段解析失败，保持上一份/空舱", t);
+        }
     }
 
     /**
@@ -1454,6 +1512,8 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
                 w.i(mu == null ? 0 : mu.id());
                 w.s((short)(mu == null || mu.type == null ? -1 : mu.type.id));
             }
+            // 炮台构成同样写进成员体内部（见 writeMembers 的说明）——尾随段会读歪后面的实体
+            writeTurretsInner(w, false);
             body = bos.toByteArray();
         }catch(Throwable t){
             // 写一半绝不能把流留在中间（后面还有实体）：按"0 成员"重写一个完整块。
@@ -1535,6 +1595,7 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
             members.clear();
             members.addAll(parsed);
             if(domHint != null) dominant = domHint;
+            readTurretsInner(r);
             if(Vars.net.client()) removeGhostMembers();
             return;
         }
@@ -1577,6 +1638,7 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         members.clear();
         members.addAll(parsed);
         if(domHint != null) dominant = domHint;
+        readTurretsInner(r);
         if(Vars.net.client()) removeGhostMembers();
     }
 
@@ -2166,6 +2228,8 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
         //（生成类 UnitEntity 的接口表里没有 Tankc/TankComp），super.update() 不含这段 ——
         // 有坦克成员时必须自己跑一遍，否则"合体后履带还能画、但压不动东西"。
         updateCrush();
+        // 炮台舱：吸收进来的炮台跟着巨兽移动/转向并开火（弹药从核心扣，见 MegaTurretBay）
+        if(bay != null) bay.tick();
         if(dead) return; // 死亡坠落由原版处理（fallSpeed）
         int mode = moveMode();
         float target = mode == MODE_FLY ? 1f : 0f;
@@ -2238,7 +2302,33 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc{
     public void remove(){
         // 原版 remove() 会调 controller.removed(this)：这一步之前必须有控制器（见 ensureController）。
         ensureController();
+        // 炮台舱里的炮台是玩家真实的建筑：巨兽消失（解体/被击毁/清场）时得放回世界，
+        // 不能跟着一起没。只在服务端/单机做（客户端的副本等服务端的快照/发包来同步）。
+        if(bay != null && !bay.isEmpty()){
+            try{
+                if(!Vars.net.client() && Vars.state.isGame() && !dead){
+                    bay.releaseAll();
+                }
+            }catch(Throwable t){
+                Log.err("[combine] 巨兽炮台放回失败", t);
+            }
+            bay = null;
+        }
         super.remove();
+    }
+
+    /** 画炮台舱里的炮台（摆在巨兽身上，由 MegaUnitType.draw 在机身/武器之后调）。 */
+    public void drawTurrets(){
+        if(bay == null || bay.isEmpty()) return;
+        for(Building b : bay.all()){
+            if(b == null) continue;
+            bay.project(b); // 位置随巨兽朝向更新（update 里已经投影过，这里再校准一次防漏帧）
+            try{
+                b.draw();
+            }catch(Throwable ignored){
+                // 一座炮台的贴图出问题不能把巨兽的绘制带崩
+            }
+        }
     }
 
     /**

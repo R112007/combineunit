@@ -7,6 +7,7 @@ import arc.struct.Seq;
 import arc.util.Log;
 import arc.util.Tmp;
 import combineunit.units.mega.MegaUnitEntity;
+import combineunit.units.mega.MegaTurretBay;
 import combineunit.units.mega.MegaUnitType;
 import mindustry.Vars;
 import mindustry.content.Fx;
@@ -15,6 +16,7 @@ import mindustry.content.UnitTypes;
 import mindustry.entities.EntityGroup;
 import mindustry.gen.Call;
 import mindustry.gen.EntityMapping;
+import mindustry.gen.Building;
 import mindustry.gen.Groups;
 import mindustry.gen.Unit;
 import mindustry.gen.WaterMovec;
@@ -382,6 +384,16 @@ public class UnitComboMerge{
         }
         mega.add();
 
+        // 【组合炮台】用户要求：合体的时候把脚下的炮台一起组合进来，摆在巨兽内部的小 World 里
+        // （炮台跟着巨兽走并照常开火，物品弹药从核心扣，解体时放回）。吸收是服务端权威操作。
+        int turrets = absorbNearbyTurrets(mega);
+        if(turrets > 0 && !Vars.headless && Vars.ui != null){
+            try{
+                Vars.ui.showInfoFade("[accent]已吸收 " + turrets + " 座炮台进入巨兽体内[]");
+            }catch(Throwable ignored){
+            }
+        }
+
         Fx.unitDrop.at(mega.x, mega.y);
         Sounds.unitCreateBig.at(mega.x, mega.y, 0.9f, 0.8f);
         return mega;
@@ -458,6 +470,13 @@ public class UnitComboMerge{
         Seq<UnitPayload> pays = new Seq<>(mega.members());
         if(pays.isEmpty()) return false;
 
+        // 【组合炮台】解体时炮台一起放回巨兽附近（在成员之前放，免得成员落点先把格子占满）
+        try{
+            if(mega.hasTurrets()) mega.bay().releaseAll();
+        }catch(Throwable t){
+            Log.err("[combineunit] 解体时炮台放回失败（继续解体成员）", t);
+        }
+
         float ratio = mega.maxHealth() > 0f ? Mathf.clamp(mega.health() / mega.maxHealth(), 0f, 1f) : 1f;
         float shieldLeft = Math.max(mega.shield(), 0f);
         int n = pays.size;
@@ -520,6 +539,66 @@ public class UnitComboMerge{
             }
         }
         return true;
+    }
+
+    /**
+     * 吸收巨兽附近的炮台（追加新炮台）：同队的炮台在吸收半径内就吃进巨兽体内。
+     * 只在服务端/单机调（客户端走 {@link #requestAbsorbTurrets}）。
+     * @return 实际吸收了几座
+     */
+    public static int absorbNearbyTurrets(MegaUnitEntity mega){
+        if(mega == null || !mega.isAdded() || Vars.net.client()) return 0;
+        float r = absorbRadius(mega);
+        // 先收集再吸收：吸收会从 Groups.build 里删建筑，边遍历边删会 ConcurrentModification
+        Seq<Building> candidates = new Seq<>();
+        for(Building b : Groups.build){
+            if(!MegaTurretBay.absorbable(b, mega.team())) continue;
+            if(mega.dst(b) > r) continue;
+            candidates.add(b);
+        }
+        int n = 0;
+        for(Building b : candidates){
+            try{
+                if(mega.bay().absorb(b)) n++;
+            }catch(Throwable t){
+                Log.err("[combineunit] 吸收炮台失败 @", b.block, t);
+            }
+        }
+        return n;
+    }
+
+    /** 吸收半径：巨兽体型 + 一圈，太远了不算"脚下的炮台"。 */
+    static float absorbRadius(MegaUnitEntity mega){
+        return Mathf.clamp(mega.hitSize() + 24f, 48f, 120f);
+    }
+
+    /** 把巨兽体内的炮台全部放回世界（不解散巨兽本身）。只在服务端/单机调。 */
+    public static int releaseTurrets(MegaUnitEntity mega){
+        if(mega == null || !mega.isAdded() || Vars.net.client()) return 0;
+        if(!mega.hasTurrets()) return 0;
+        return mega.bay().releaseAll();
+    }
+
+    /** 客户端请求追加附近炮台（联机时走 MegaOrderPacket，服务器权威结算）。 */
+    public static void requestAbsorbTurrets(Unit u){
+        if(!(u instanceof MegaUnitEntity)) return;
+        if(Vars.net.client()){
+            MegaOrderPacket p = MegaOrderPacket.turrets(true, u);
+            Vars.net.send(p, true);
+        }else{
+            absorbNearbyTurrets((MegaUnitEntity)u);
+        }
+    }
+
+    /** 客户端请求释放全部炮台。 */
+    public static void requestReleaseTurrets(Unit u){
+        if(!(u instanceof MegaUnitEntity)) return;
+        if(Vars.net.client()){
+            MegaOrderPacket p = MegaOrderPacket.turrets(false, u);
+            Vars.net.send(p, true);
+        }else{
+            releaseTurrets((MegaUnitEntity)u);
+        }
     }
 
     /** 巨兽的成员构成描述（如 "战锤×2, 领主×1"）；非巨兽或没有成员返回空串。 */

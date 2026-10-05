@@ -240,8 +240,28 @@ public class Driver extends Mod{
                 Timer.schedule(() -> shot("engines_mega"), 23f);
                 Timer.schedule(Driver::enginesReport, 25f);
                 Timer.schedule(() -> { Log.info("[drv] engines 模式结束 frames=@", frames); Core.app.exit(); }, 30f);
+            }else if(mode.equals("turret")){
+                // 组合巨兽合体时把脚下的炮台一起吸收进体内的小 World（用户要求）：
+                // 巨兽脚下摆 duo/scatter 两座炮台，两只 dagger 在左边融合 → 炮台被吸收、画在巨兽身上；
+                // 再给一只敌人当靶子（看炮台真的开火）；最后把巨兽转个角度再拍一张，看炮台跟着转。
+                installFrameCounter();
+                installCameraLock();
+                keepDialogsHidden();
+                Timer.schedule(Driver::setupMidScene, 5f);
+                Timer.schedule(Driver::turretMerge, 10f);
+                Timer.schedule(Driver::turretPlace, 13f);
+                Timer.schedule(Driver::turretAddEnemy, 16f);
+                Timer.schedule(Driver::turretReport, 18f);
+                Timer.schedule(() -> Vars.renderer.setScale(3f), 19f);
+                Timer.schedule(() -> shot("turret_rot90"), 22f);
+                Timer.schedule(() -> turretRot = 0f, 25f);
+                Timer.schedule(Driver::turretReport, 28f);
+                Timer.schedule(() -> shot("turret_rot0"), 30f);
+                Timer.schedule(Driver::turretOpenPanel, 33f);
+                Timer.schedule(() -> shot("turret_panel"), 36f);
+                Timer.schedule(() -> { Log.info("[drv] turret 模式结束 frames=@", frames); Core.app.exit(); }, 41f);
             }else{
-                Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega|hover|icon|mid|tank|sf|flight|engines）", mode);
+                Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega|hover|icon|mid|tank|sf|flight|engines|turret）", mode);
                 Core.app.exit();
             }
         });
@@ -1528,6 +1548,149 @@ public class Driver extends Mod{
             Log.info("[drv] tank 参照（单台 vanquish）: treadRects=@ treadFrames=@ crushDamage=@",
                 UnitTypes.vanquish.treadRects.length, UnitTypes.vanquish.treadFrames, UnitTypes.vanquish.crushDamage);
         }catch(Throwable t){ Log.err("[drv] tankReport failed", t); }
+    }
+
+    // ---------------- turret（组合炮台：合体吸收附近炮台，摆在巨兽身上、跟着转） ----------------
+    static Unit turretBeast, turretEnemy;
+    static float turretRot = 90f;
+
+    /** 先合体（造了两只大机甲立刻合）：巨兽身体比炮台大，"炮台摆在身上"才看得出来。 */
+    static void turretMerge(){
+        try{
+            float cx = midOx * 8f, cy = midOy * 8f;
+            mergeAt(cx, cy, UnitTypes.vanquish, UnitTypes.vanquish, mu -> {
+                turretBeast = mu;
+                camTarget = mu;
+                // 钉住位置 + 朝向：截图里炮台的位置 = 按朝向投影的结果，和日志逐座对照
+                var t = new arc.scene.ui.layout.Table();
+                t.touchable = arc.scene.event.Touchable.disabled;
+                t.update(() -> {
+                    if(turretBeast == null || !turretBeast.isAdded()) return;
+                    turretBeast.rotation(turretRot);
+                    turretBeast.vel().setZero();
+                });
+                Vars.ui.hudGroup.addChild(t);
+                Log.info("[drv] turret: 融合=@ 炮台舱=@ 座 hitSize=@", mu.type.name, turretBaySize(mu), mu.hitSize());
+            });
+            if(turretBeast == null){
+                StringBuilder sb = new StringBuilder();
+                for(Unit u : Groups.unit) sb.append("\n      ").append(u.type.name).append(" team=").append(u.team())
+                    .append(" 有效=").append(u.isValid()).append(" 存活=").append(!u.dead())
+                    .append(" 血=").append((int)u.health()).append(" @(").append((int)u.x).append(",").append((int)u.y).append(")");
+                Log.err("[drv] turret: 融合失败（没有巨兽）Groups.unit=@ net.client=@ unitCap=@:@", Groups.unit.size(), Vars.net.client(), Vars.state.rules.unitCap, sb);
+            }
+        }catch(Throwable t){ Log.err("[drv] turretMerge failed", t); }
+    }
+
+    /** 巨兽旁边摆 duo/scatter 两座炮台（+ 一座远的当对照），再调 absorbNearbyTurrets 吸收进炮台舱。 */
+    static void turretPlace(){
+        try{
+            if(turretBeast == null) return;
+            ensureTeamCore();
+            int bx = (int)(turretBeast.x / 8f), by = (int)(turretBeast.y / 8f);
+            Building duo = placeBL(Blocks.duo, bx + 5, by);         // 物品炮台（弹药从核心扣）
+            Building scatter = placeBL(Blocks.scatter, bx + 5, by + 3);
+            Building wave = placeBL(Blocks.wave, bx + 1, by + 5);    // 液体炮台（直接补给）
+            Building far = placeBL(Blocks.duo, bx + 22, by + 14);   // 远处对照
+            run(2);
+            Object n = combineCall("combineunit.units.UnitComboMerge", "absorbNearbyTurrets",
+                new Class<?>[]{Class.forName("combineunit.units.mega.MegaUnitEntity", true, ml)}, turretBeast);
+            Log.info("[drv] turret: 放置后吸收=@ 炮台舱=@ 座（duo=@ scatter=@ wave=@ far=@）",
+                n, turretBaySize(turretBeast), duo != null, scatter != null, wave != null, far != null);
+        }catch(Throwable t){ Log.err("[drv] turretPlace failed", t); }
+    }
+
+    /**
+     * 驱动用 placeBL 摆的核心没走 placed/updateProximity，`team.core()` 是 null（真游戏里不会），
+     * 炮台补弹要靠核库存 —— 这里补一次登记，让"物品炮台从核心扣弹药"这条路在客户端也跑起来。
+     */
+    static void ensureTeamCore(){
+        try{
+            if(Team.sharded.core() != null) return;
+            for(Building b : Groups.build){
+                if(b.team == Team.sharded && b instanceof mindustry.world.blocks.storage.CoreBlock.CoreBuild cb){
+                    try{ b.updateProximity(); }catch(Throwable ignored){}
+                    if(Team.sharded.core() == null){
+                        try{ Team.sharded.data().cores.add(cb); }catch(Throwable ignored){}
+                    }
+                    break;
+                }
+            }
+            Log.info("[drv] turret: 核心登记后 team.core()=@", Team.sharded.core() == null ? "null" : Team.sharded.core().block.name);
+        }catch(Throwable t){ Log.err("[drv] ensureTeamCore failed", t); }
+    }
+
+    /** 放靶子：让吸收进巨兽体内的炮台朝它开火（也是客户端能看到的子弹特效）。 */
+    static void turretAddEnemy(){
+        try{
+            if(turretBeast == null) return;
+            turretEnemy = UnitTypes.dagger.create(Team.crux);
+            turretEnemy.set(turretBeast.x + 80f, turretBeast.y);
+            turretEnemy.maxHealth(1e9f);
+            turretEnemy.health(1e9f);
+            turretEnemy.add();
+            Log.info("[drv] turret: 靶子已放 @,@（巨兽 @,@）", (int)turretEnemy.x, (int)turretEnemy.y, (int)turretBeast.x, (int)turretBeast.y);
+        }catch(Throwable t){ Log.err("[drv] turretAddEnemy failed", t); }
+    }
+
+    static int turretBaySize(Unit mega){
+        try{
+            Object bay = mega.getClass().getMethod("bay").invoke(mega);
+            return (Integer)bay.getClass().getMethod("size").invoke(bay);
+        }catch(Throwable t){ return -1; }
+    }
+
+    /** 炮台舱里每座炮台的世界坐标（相对巨兽）、朝向、血量、弹药 —— 和截图逐座对照。 */
+    @SuppressWarnings("unchecked")
+    static void turretReport(){
+        try{
+            if(turretBeast == null){ Log.err("[drv] turret: 没有巨兽"); return; }
+            Object bay = turretBeast.getClass().getMethod("bay").invoke(turretBeast);
+            Seq<Building> all = (Seq<Building>)bay.getClass().getMethod("all").invoke(bay);
+            StringBuilder sb = new StringBuilder();
+            for(Building b : all){
+                String ammo;
+                if(b instanceof mindustry.world.blocks.defense.turrets.ItemTurret.ItemTurretBuild itb){
+                    ammo = "弹药点数=" + itb.totalAmmo + " 上限=" + ((mindustry.world.blocks.defense.turrets.ItemTurret)b.block).maxAmmo + " cheating=" + itb.cheating();
+                }else if(b.liquids != null){
+                    ammo = "液体=" + String.format("%.1f", b.liquids.currentAmount());
+                }else{
+                    ammo = "-";
+                }
+                sb.append("\n      ").append(b.block.localizedName)
+                  .append(" 相对巨兽 dx=").append(String.format("%.1f", b.x - turretBeast.x))
+                  .append(" dy=").append(String.format("%.1f", b.y - turretBeast.y))
+                  .append(" 朝向=").append(b.rotation)
+                  .append(" 血量=").append(String.format("%.0f", b.health))
+                  .append(" ").append(ammo);
+            }
+            Log.info("[drv] turret 巨兽: hitSize=@ rotation=@ 炮台舱=@ 座@",
+                turretBeast.hitSize(), turretBeast.rotation(), all.size, sb);
+            Building core = turretBeast.team() == null ? null : turretBeast.team().core();
+            Log.info("[drv] turret 补给现场: team=@ core=@ 核心铜=@",
+                turretBeast.team(), core == null ? "null" : core.block.name, core == null ? -1 : core.items.get(Items.copper));
+            var duoDef = (mindustry.world.blocks.defense.turrets.ItemTurret)Blocks.duo;
+            Seq<mindustry.entities.bullet.BulletType> ammo = new Seq<>();
+            for(mindustry.entities.bullet.BulletType bt : duoDef.ammoTypes.values()) ammo.add(bt);
+            int near = 0;
+            for(Bullet bl : Groups.bullet) if(ammo.indexOf(bl.type, true) != -1 && turretBeast.dst(bl) < 300f) near++;
+            Log.info("[drv] turret: 巨兽附近的 duo 子弹=@（场上弹体总数=@）", near, Groups.bullet.size());
+        }catch(Throwable t){ Log.err("[drv] turretReport failed", t); }
+    }
+
+    /** 弹出 UnitComboBind 的"单位组合"面板（组合巨兽分支：炮台数 + 追加/释放两个按钮）。 */
+    static void turretOpenPanel(){
+        try{
+            if(turretBeast == null) return;
+            Class<?> c = Class.forName("combineunit.units.UnitComboBind", true, ml);
+            java.lang.reflect.Field pf = c.getDeclaredField("picked");
+            pf.setAccessible(true);
+            pf.set(null, turretBeast);
+            java.lang.reflect.Method m = c.getDeclaredMethod("openDialog");
+            m.setAccessible(true);
+            m.invoke(null);
+            Log.info("[drv] turret: 组合面板已弹出（炮台 @ 座）", turretBaySize(turretBeast));
+        }catch(Throwable t){ Log.err("[drv] turretOpenPanel failed", t); }
     }
 
     static void shot(String name){

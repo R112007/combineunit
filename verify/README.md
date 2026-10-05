@@ -59,6 +59,8 @@ done
 | `ComboFireSupportTest`（+ combine 仓库的 `combine.dbg.MegaRepairFireTest`） | 借火只许打敌方目标：维修/建造武器跟踪的是**己方建筑**、玩家长按维修时瞄准点也压在自家房子上，照着打就会把同组其他成员的武器引到己方建筑上（用户报的"mega 武器去修复建筑的时候，其他武器的开火会损坏己方建筑"）。实测修前己方半血墙被借火打 14 发，修后己方目标/瞄准点 0 发、敌方目标照常 14 发；巨兽自己 `groupable=false`（不参与借火） |
 | `MegaClipSizeTest` | 给巨兽排建造计划后 `clipSize` 不崩（视口裁剪用） |
 | `MegaGhostTest` | 合体后不是本地幽灵、控制器/指令表/姿态齐全、移动指令生效、解体后成员回世界、编组入口（comboId）行为 |
+| `MegaTurretTest` | **组合炮台**（合体时把附近炮台吸收进巨兽体内的小 World）：①合体吸收脚下的 duo+scatter 两座、吸收半径外的远处炮台不动、被吸收的从世界里消失；②炮台随巨兽转向（`Angles.trns(rotation-90)` 投影，转向后仍在身上）；③**物品炮台的子弹从核心里扣**（实测核心铜 4992→4988、场上出现 duo 的弹体）且真的开火；④释放（放出 2 座、落回巨兽附近的世界）/追加吸收（`absorbNearbyTurrets`）往返；⑤解体后炮台跟着放回（世界里建筑数 2→4）；⑥**快照字节**（155B）与**存档字节**（452B）两端往返都能重建成员+炮台；⑦**空舱**快照（150B）不炸；⑧**发布版老存档**（`saves/17.msav`，没有炮台段）照样读得进去（读回 4 只巨兽）。23/23 PASS |
+| （UI 约定，无单独用例） | 合成单位菜单 (`UnitComboBind`) 里点了会改内容的按钮时，**弹窗重画必须延后一帧**（只置 `rebuildQueued`，下一帧 `tick` 再 `hide()+openDialog()`）：arc 的点击回调还在 input 派发栈上，当场 `dialog.cont.clear()` 会把正在派发的按钮/pane 从场景里摘掉，arc 随后 `getScene().addTouchFocus(...)` 直接 NPE 崩游戏（用户 2026-09-29 崩溃；combine 那边的设置列表、`ComboInputGuard` 兜底见 combine 仓库 README） |
 | `MegaBuilderAiNpeTest` | 用户安卓崩溃 `BuilderAI.useFallback` 读 `unit.team` NPE（`CommandAI.updateUnit → 命令控制器 BuilderAI`）：巨兽的控制器是"半成品"（`controller != null` 但 `unit == null`，网络读回来的 CommandAI / 读快照中途异常的残留）时，挂着成员带来的 `rebuild`/`assist` 建造指令（poly 这类工程单位）那一帧必崩。判定：这种状态 tick 不抛异常、且当帧把控制器挂回巨兽（`ensureController` 不再只判 `controller == null`）。修前 2 项 FAIL（复现同款 NPE），修后 5/5 PASS |
 | `ComboFireSupportTest` | 组合火力共享不借治疗类武器代打（带治疗的弹体必须为 0），自己的武器照常开火 |
 
@@ -75,6 +77,7 @@ verify/run-client.sh mx /tmp/mp_unit/data duo        # dagger + vela（碰撞箱
 verify/run-client.sh mx /tmp/mp_unit/data shipmega   # 两艘 risso 在深水里融合（水阻）
 verify/run-client.sh mx /tmp/mp_unit/data flight     # 2×dagger（该贴地）vs 2×dagger+1×flare（有飞机该悬空）
 verify/run-client.sh mx /tmp/mp_unit/data engines    # 原版 avert vs 2×avert 巨兽（多引擎成员的喷口）
+verify/run-client.sh mx /tmp/mp_unit/data turret     # 组合炮台：合体吸收 duo/scatter/wave，摆在巨兽身上、随朝向转
 ```
 
 截图落在 `~/sd/shots/`（脚本自动建目录、文件名带跨次运行的连续序号 `001_` `002_`…），
@@ -93,6 +96,7 @@ verify/run-client.sh mx /tmp/mp_unit/data engines    # 原版 avert vs 2×avert 
 | shipmega | `*_ship_mega.png` | 巨兽浮在深水上、地形速度系数和原版船一致（1.3） |
 | flight | `*_flight_rule.png` | "有飞机就飞"：同一张图里左边 2×dagger（贴地、无引擎）、右边 2×dagger+1×flare（悬空、画出引擎尾焰、体型按综合 hitSize 放大）。日志同时打印两边的 `type.flying/elevation/isFlying/canShoot` —— 实测纯地面 `flying=false elevation=0.0 isFlying=false`，带一架 flare `flying=true elevation=1.0 isFlying=true` |
 | engines | `*_engines_mega.png` | 多引擎成员：原版 avert（`setEnginesMirror` 摆的 4 个喷口、`engineSize=0`）的喷口要**整套**照抄到巨兽身上（原来只画居中一个）。日志逐个数：参考 avert `engines=4 → (9,-9 r3.0 315°) (-9,-9 r3.0 225°) (10,-4 r3.0 315°) (-10,-4 r3.0 225°)`；2×avert 巨兽 `hitSize=16.97 elevation=1.0 isFlying=true engines=4 → (12,-13 r4.2) (-12,-13 r4.2) (14,-6 r4.2) (-14,-6 r4.2)`（= 参考 ×1.414，朝向不变）。截图 `214_engines_mega.png` 里巨兽身上有 4 个喷口尾焰（原版 avert 参照那只在左下，和齿轮按钮有点重叠） |
+| turret | `*_turret_rot90/rot0.png` `*_turret_panel.png` | **组合炮台**：两只 vanquish 合体后，在巨兽旁边摆 duo/scatter/wave 三座炮台再 `absorbNearbyTurrets` —— 看炮台有没有画在巨兽身上、有没有飞出身体、随巨兽朝向变化（日志逐座打 `相对巨兽 dx/dy`：rotation 90→0 时坐标变了）；液体炮台（wave）直接补给（日志 `液体=9.0`）。面板那张看 `组合巨兽 … 炮台 3 座（…）` 那行 + 「追加附近炮台」「释放全部炮台」两个按钮。实测截图 `304/305_turret_rot90/rot0.png`、`306_turret_panel.png` |
 
 驱动 mod（`verify/client/Driver.java`）的模式场景是从 combine 仓库搬过来的（拆仓后单位侧只在本仓库）；
 建筑侧那些模式（设置列表/CoopPanel/电网/科技树…）留在 combine 仓库的 Driver 里。
@@ -129,6 +133,30 @@ verify/run-client.sh mx /tmp/mp_unit/data engines    # 原版 avert vs 2×avert 
 
 （这批量测说明：只看"子弹类型/首帧瞄准点/转向量"看不出问题 —— 问题在**枪口布局**上，
 得量"镜像搭档的相对位置"。）
+
+## 组合炮台（合体吸收附近炮台）：实现与那个**存档字节错位**的坑
+
+用户要求：组合巨兽合体时把附近的炮台一起组合进来，炮台摆在巨兽内部的 World 里
+（参考 `~/sd/q/WorldUnit.java`）；物品炮台的子弹从队伍核心里扣，液体/电力类炮台直接补给；
+支持解体放回炮台、追加新炮台。
+
+实现见 `src/combineunit/units/mega/MegaTurretBay.java`：吸收时先 `tile.setBlock(air)` 走原版流程
+（`onRemoved`、从 `Groups.build`/队伍索敌树里摘干净），再**绕过 `setBlock`**（`Tile.updateBlockReference`
++`tile.build`）把真实 `Building` 挂进内部小 World 的格子里 —— 不走事件、不再进 `Groups`，
+免得在地图角落留一堆幽灵索敌目标。每 tick 按 `Angles.trns(rotation - 90)` 把内部坐标投影到
+巨兽身上的世界坐标再 `update()`（索敌/起火用的都是真实坐标，`Vars.world` 全程是真实世界）。
+补给：`ItemTurret` 的弹药从 `team.core()` 扣（每 tick 最多 2 个料、补到半仓）；`LiquidTurret`/
+`ContinuousLiquidTurret` 直接加满、`power.status=1`。解体/释放走标准 `setBlock` 放回世界。
+
+**踩过的坑（关键）**：炮台段一开始是写在"原版字段 + 成员块"之后的**尾随段**（标记 + 长度 + 体）。
+但存档里每个实体是 `int 长度 + 体`（`SaveFileReader.writeChunk`），读端按长度前进 ——
+**发布版（9/29）写的存档只有成员块、没有炮台段**，新读端在实体末尾再读 1 个字节的炮台标记，
+正好吃到**下一个实体的长度前缀**，把后面所有实体读歪（整个存档读不进去）。
+改法：把炮台段**写进成员体内部**（成员体本身有长度前缀、按长度整块读进内存）。
+这样老存档读到炮台段之前就 EOF → 被吞掉保持空舱；新存档两端对称；
+旧版客户端读新版快照也只是把多出来的炮台字节当成成员体的一部分丢掉。
+回归：`MegaTurretTest` 第 8 节直接读 `/tmp/mp_unit/data/saves/17.msav`（发布版写的、没有炮台段），
+实测能读进去、读回 4 只巨兽；同测试还压了存档字节往返（452B）与空舱快照（150B）。
 
 ## 3. 换 jar / 换版本
 

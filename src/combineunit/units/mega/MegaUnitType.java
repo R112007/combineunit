@@ -580,6 +580,13 @@ public class MegaUnitType extends UnitType {
         drawWeaponOutlines(unit);
         drawWeapons(unit);
 
+        // 【组合炮台】巨兽体内吸收的炮台画在机身/武器之上：摆在巨兽身上，跟着巨兽转
+        if(mu != null){
+            Draw.z(z + 1f);
+            mu.drawTurrets();
+            Draw.z(z);
+        }
+
         // 【身上物品】原版在 drawWeapons 之后画（图标 + 底圈；操控自己那只时还有数量数字，
         // 见 UnitType.drawItems 里的 unit.isLocal() 判断）。巨兽是完全自定义绘制，这一段
         // 必须自己接上，否则"身上有物品却不显示有多少物品"。

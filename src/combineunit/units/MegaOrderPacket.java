@@ -23,6 +23,10 @@ public class MegaOrderPacket extends Packet{
     public boolean group;
     /** true = 退出组合（memberIds 里的单位把 comboId 清零）。仅 split=false、group=false 时有意义。 */
     public boolean ungroup;
+    /** true = 释放巨兽体内全部炮台（absorbTurrets=false 时才有意义）。 */
+    public boolean dropTurrets;
+    /** true = 把附近的炮台吸收进巨兽体内；false = 把巨兽体内的炮台全部放回世界。 */
+    public boolean absorbTurrets;
     /** 目标单位的网络 id（融合 = 发起单位；解体 = 巨兽；编组时取第一个成员）。 */
     public int unitId;
     /** 框选操作（合体/编组）时的成员 id 列表；为空表示旧式"发起单位+周围全组合"。 */
@@ -38,11 +42,22 @@ public class MegaOrderPacket extends Packet{
         return p;
     }
 
+    /** 炮台操作包：absorb=true 吸收附近炮台，false 释放全部炮台。 */
+    public static MegaOrderPacket turrets(boolean absorb, Unit unit){
+        MegaOrderPacket p = new MegaOrderPacket();
+        p.absorbTurrets = absorb;
+        p.dropTurrets = !absorb;
+        p.unitId = unit == null ? -1 : unit.id();
+        return p;
+    }
+
     @Override
     public void write(Writes write){
         write.bool(split);
         write.bool(group);
         write.bool(ungroup);
+        write.bool(absorbTurrets);
+        write.bool(dropTurrets);
         write.i(unitId);
         write.i(memberIds == null ? 0 : memberIds.length);
         if(memberIds != null){
@@ -55,6 +70,8 @@ public class MegaOrderPacket extends Packet{
         split = read.bool();
         group = read.bool();
         ungroup = read.bool();
+        absorbTurrets = read.bool();
+        dropTurrets = read.bool();
         unitId = read.i();
         int n = Math.min(Math.max(read.i(), 0), 4096);
         memberIds = new int[n];
@@ -76,7 +93,13 @@ public class MegaOrderPacket extends Packet{
         // 只能对自己队伍的单位发号施令
         if(connection.player.team() != unit.team()) return;
 
-        if(split){
+        if(absorbTurrets){
+            // 追加附近炮台进巨兽体内
+            if(unit instanceof MegaUnitEntity m) UnitComboMerge.absorbNearbyTurrets(m);
+        }else if(dropTurrets){
+            // 把巨兽体内的炮台全部放回世界
+            if(unit instanceof MegaUnitEntity m) UnitComboMerge.releaseTurrets(m);
+        }else if(split){
             if(unit instanceof MegaUnitEntity) UnitComboMerge.split(unit);
         }else if(ungroup){
             // 退出组合：只打 comboId = 0，服务器按 id 自己解析校验
