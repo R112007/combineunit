@@ -257,8 +257,10 @@ public class Driver extends Mod{
                 Timer.schedule(() -> turretRot = 0f, 25f);
                 Timer.schedule(Driver::turretReport, 28f);
                 Timer.schedule(() -> shot("turret_rot0"), 30f);
-                Timer.schedule(Driver::turretOpenPanel, 33f);
-                Timer.schedule(() -> shot("turret_panel"), 36f);
+                // keepDialogsHidden 每秒清一次弹窗，会把组合面板一起清掉 —— 面板要在
+                // "刚清完" 的缝隙里弹出（36.4）并立刻截图（36.8），别等到下一个整秒。
+                Timer.schedule(Driver::turretOpenPanel, 36.4f);
+                Timer.schedule(() -> shot("turret_panel"), 36.8f);
                 Timer.schedule(() -> { Log.info("[drv] turret 模式结束 frames=@", frames); Core.app.exit(); }, 41f);
             }else{
                 Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega|hover|icon|mid|tank|sf|flight|engines|turret）", mode);
