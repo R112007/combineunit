@@ -8,6 +8,7 @@ import arc.math.Mathf;
 import arc.math.geom.Vec2;
 import arc.struct.ObjectMap;
 import arc.struct.Seq;
+import arc.util.Nullable;
 import arc.util.Tmp;
 import arc.util.Log;
 import arc.util.io.Reads;
@@ -34,6 +35,7 @@ import mindustry.io.TypeIO;
 import mindustry.type.Liquid;
 import mindustry.type.UnitType;
 import mindustry.type.Weapon;
+import mindustry.world.Block;
 import mindustry.world.Tile;
 import mindustry.world.blocks.environment.Floor;
 import mindustry.world.blocks.payloads.Payload;
@@ -2631,8 +2633,36 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc {
                 continue;
             bay.project(b); // 位置随巨兽朝向更新（update 里已经投影过，这里再校准一次防漏帧）
             float prev = Draw.z();
+            Block prevBlock = b.block;
             try {
-                if (b.block instanceof Turret turret && turret.drawer instanceof DrawTurret dt) {
+                // 【组合方块副本】装了 combine 时，世界里的炮台是"组合方块接管了原版名字"的副本，
+                // 副本的 drawer 有些客户端上**一张图都没 load**（用户报"drawer 就是没画、有的炮台
+                // 轮廓线都没有，比如 cyclone"）。combine 的合体炮台是靠 cellBlock() 换回原版方块 +
+                // cellDrawerIncomplete() 退回整套图标解决的，这里照同一口径：
+                // 画的时候临时把 block 换成"它替换前的原版实例"（反射查 combine.BlockCloner），
+                // 于是走的是原版那份加载好的抽屉（本体/液体/top/热量/描边/parts 都在）。
+                Block orig = comboOriginal(b.block);
+                if (orig instanceof Turret && orig != prevBlock)
+                    b.block = orig;
+                drawOneTurret(b, z);
+            } catch (Throwable ignored) {
+                // 一座炮台的贴图出问题不能把巨兽的绘制带崩
+            } finally {
+                b.block = prevBlock;
+                Draw.z(prev);
+            }
+        }
+    }
+
+    /** 画一座舱内炮台（调用方已把它按需要投影好、必要时把 block 换回原版实例）。 */
+    private static void drawOneTurret(Building b, float z) {
+        if (b.block instanceof Turret turret && turret.drawer instanceof DrawTurret dt) {
+            // drawer 的图没加载上（组合副本在有些客户端上就是这样）：整台退回"整套图标"，
+            // 宁可静态也别留一块空的（combine 仓库 SuperTurret.cellDrawerIncomplete 同口径）。
+            if (turretDrawerIncomplete(turret, dt)) {
+                drawTurretIcon(b, z);
+                return;
+            }
                     if (turret.drawer.getClass() == DrawTurret.class) {
                         // 原版 DrawTurret：照 combine 仓库 SuperTurret.drawCellDrawer 复刻一遍，
                         // 但**所有层都落在 z 上** —— 底板/本体/液体/top/热量/描边/parts/ammoParts
@@ -2656,7 +2686,7 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc {
                             dt.heatLayer = lh;
                         }
                     }
-                } else {
+        } else {
                     // 不是 DrawTurret 的 drawer（DrawMulti / 模组自定义）：抬**嵌套**的 DrawTurret 的层号后
                     // 再交给它自己画。模组炮台常写成 `drawer = new DrawMulti(new DrawRegion(...), new DrawTurret())`
                     // ——里面那颗 DrawTurret 会把本体/parts 画在 Layer.turret(50)，低于巨兽机身(60) →
@@ -2670,13 +2700,127 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc {
                     } finally {
                         restoreTurretLayers(raised);
                     }
+        }
+    }
+
+    // ==================== 组合方块副本（combine 仓库）====================
+
+    /** {@code combine.BlockCloner.comboToOriginal}，按类加载器缓存（没装 combine 时是"查过但 null"）。 */
+    private static final arc.struct.ObjectMap<ClassLoader, arc.struct.ObjectMap<Block, Block>> comboMaps =
+            new arc.struct.ObjectMap<>();
+    private static final arc.struct.ObjectSet<ClassLoader> comboMapsTried = new arc.struct.ObjectSet<>();
+
+    /**
+     * 这个方块是不是 combine 的"组合方块副本"；是就返回它替换前的原版方块实例。
+     *
+     * <p>两个仓库没有编译期依赖（combineunit 不能 import combine），所以走反射拿那张表；
+     * 拿不到（没装 combine / 反射失败）一律返回 null，行为与旧版一致。
+     */
+    public static @Nullable Block comboOriginal(Block block) {
+        if (block == null)
+            return null;
+        ClassLoader cl = block.getClass().getClassLoader();
+        if (cl == null)
+            return null;
+        arc.struct.ObjectMap<Block, Block> map = comboMaps.get(cl);
+        if (map == null && !comboMapsTried.contains(cl)) {
+            // 按类加载器各查一次：模组方块来自模组加载器、原版方块来自游戏加载器，
+            // 只有模组加载器那份能看见 combine.BlockCloner。
+            comboMapsTried.add(cl);
+            try {
+                Class<?> cls = Class.forName("combine.BlockCloner", false, cl);
+                Object v = cls.getField("comboToOriginal").get(null);
+                if (v instanceof arc.struct.ObjectMap<?, ?> m) {
+                    map = (arc.struct.ObjectMap<Block, Block>) m;
+                    comboMaps.put(cl, map);
                 }
             } catch (Throwable ignored) {
-                // 一座炮台的贴图出问题不能把巨兽的绘制带崩
-            } finally {
-                Draw.z(prev);
             }
         }
+        if (map == null)
+            return null;
+        try {
+            return map.get(block);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 这一座炮台抽屉里的图是不是"一张都没加载上"（照 combine 的 SuperTurret.cellDrawerIncomplete）。 */
+    public static boolean turretDrawerIncomplete(Turret turret, DrawTurret dt) {
+        try {
+            if (!found(dt.base) && !found(dt.preview) && !found(dt.top) && !found(dt.outline)
+                    && !found(turret.region))
+                return true;
+            if (partRegionsMissing(dt.parts))
+                return true;
+            for (var arr : dt.ammoParts.values())
+                if (partRegionsMissing(arr))
+                    return true;
+            return false;
+        } catch (Throwable t) {
+            return true; // 判据本身出错 → 当不完整处理，保证不会画半台
+        }
+    }
+
+    private static boolean found(TextureRegion r) {
+        return r != null && r.found();
+    }
+
+    /** 这组部件里有没有"声明了要画图、却一张图都没加载上"的（heat-only 部件不算）。 */
+    private static boolean partRegionsMissing(mindustry.entities.part.DrawPart[] parts) {
+        if (parts == null)
+            return false;
+        return partRegionsMissing(new Seq<>(parts));
+    }
+
+    private static boolean partRegionsMissing(Seq<mindustry.entities.part.DrawPart> parts) {
+        if (parts == null)
+            return false;
+        for (mindustry.entities.part.DrawPart p : parts) {
+            if (!(p instanceof mindustry.entities.part.RegionPart rp) || !rp.drawRegion)
+                continue; // 只画热量/不画图的部件（drawRegion=false）不算缺图
+            boolean any = false;
+            if (rp.regions != null)
+                for (TextureRegion r : rp.regions)
+                    if (found(r))
+                        any = true;
+            if (!any)
+                return true;
+        }
+        return false;
+    }
+
+    /**
+     * 抽屉画不出图时的兜底：把**整套图标**画在炮台位置上（口径同原版：图标朝上 = rotation-90）。
+     *
+     * <p>顺序：本体的 fullIcon/uiIcon/region → 按方块名直接查图集（{@code block-<名字>-full}、
+     * 方块名本身、{@code -preview}）→ error。副本方块连 fullIcon 都是空的，所以那一层按名字查
+     * 是关键（图集是全局的，按名字一定查得到）。
+     */
+    private static void drawTurretIcon(Building b, float z) {
+        Block blk = b.block;
+        if (blk == null || Core.atlas == null)
+            return;
+        TextureRegion icon = firstFound(blk.fullIcon, blk.uiIcon, blk.region,
+                Core.atlas.find("block-" + blk.name + "-full"),
+                Core.atlas.find(blk.name),
+                Core.atlas.find(blk.name + "-preview"),
+                Core.atlas.find("error"));
+        if (icon == null)
+            return;
+        float rot = b instanceof Turret.TurretBuild tb ? tb.drawrot() : 0f;
+        Draw.z(z);
+        Draw.rect(icon, b.x, b.y, rot);
+    }
+
+    /** 第一个真正加载出来的贴图。 */
+    private static @Nullable TextureRegion firstFound(TextureRegion... regions) {
+        if (regions != null)
+            for (TextureRegion r : regions)
+                if (found(r))
+                    return r;
+        return null;
     }
 
     /**

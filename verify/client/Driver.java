@@ -1682,7 +1682,72 @@ public class Driver extends Mod{
             Log.info("[drv] turret: 放置后吸收=@ 炮台舱=@ 座（duo=@ scatter=@ wave=@ far=@）",
                 n, turretBaySize(turretBeast), duo != null, scatter != null, wave != null, far != null);
             Log.info("[drv] turret: cyclone 放置=@", cyclone != null);
+            // 【可选】-Ddrv.break=1：确定性地复现"组合副本的抽屉图一张都没加载"（用户机器上的状态），
+            // 用来核对巨兽舱有没有把这种炮台画出来。默认关，免得常规截图里炮台是坏的。
+            if(Boolean.getBoolean("drv.break")) turretBreakDrawer();
         }catch(Throwable t){ Log.err("[drv] turretPlace failed", t); }
+    }
+
+    /**
+     * 【复现用户报的现象】"炮台与组合巨兽合体后 drawer 没画，有的炮台轮廓线都没有，比如 cyclone"：
+     * 装了 combine 时，世界里的炮台是"组合方块接管了原版名字"的**副本**，副本的 drawer 在有些客户端上
+     * 一张图都没 load（不是所有环境，本机就复现不出来）。
+     *
+     * <p>这里把舱里第一座炮台的方块**贴图字段全清空**（drawer 的 base/preview/top/outline/liquid/heat
+     * 和 block 的 region/fullIcon/uiIcon），在任何机器上确定性地造出"抽屉里一张图都没有"的状态：
+     * <ul>
+     *   <li>世界里同型号的炮台（走原版绘制）= 空白（这就是用户机器上看到的）；</li>
+     *   <li>巨兽舱里这一座 = 必须**照样画出来**（抽屉画不出就退回整套图标；装了 combine 且它是
+     *       组合副本时会换回原版方块用真抽屉画，见 MegaUnitEntity.comboOriginal/drawTurretIcon）。</li>
+     * </ul>
+     */
+    static void turretBreakDrawer(){
+        try{
+            if(turretBeast == null) return;
+            Object bay = turretBeast.getClass().getMethod("bay").invoke(turretBeast);
+            @SuppressWarnings("unchecked")
+            Seq<Building> all = (Seq<Building>)bay.getClass().getMethod("all").invoke(bay);
+            if(all.isEmpty()) return;
+            Building victim = all.first();
+            Block real = victim.block;
+            if(real == null) return;
+            boolean copy = false;
+            try{
+                java.lang.reflect.Field f = Class.forName("combine.BlockCloner", true, ml).getField("comboToOriginal");
+                @SuppressWarnings("unchecked")
+                arc.struct.ObjectMap<Block, Block> m = (arc.struct.ObjectMap<Block, Block>)f.get(null);
+                copy = m.containsKey(real);
+            }catch(Throwable ignored){
+            }
+            nullField(real, "region");
+            nullField(real, "fullIcon");
+            nullField(real, "uiIcon");
+            if(real instanceof mindustry.world.blocks.defense.turrets.Turret rt
+                && rt.drawer instanceof mindustry.world.draw.DrawTurret dt){
+                for(String f : new String[]{"base", "preview", "top", "outline", "liquid", "heat"})
+                    nullField(dt, f);
+            }
+            Log.info("[drv] turret 模拟现场: 舱里这座 @ 是组合方块副本=@；已把它的 drawer/base+preview+top+outline+"
+                + "liquid+heat 与 region/fullIcon/uiIcon 全清空（= 用户机器上「抽屉一张图都没加载」的状态）→"
+                + " 世界里同型号的炮台会变空白，巨兽舱里这一座应当**照样画出来**", real.name, copy);
+        }catch(Throwable t){ Log.err("[drv] turretBreakDrawer failed", t); }
+    }
+
+    /** 反射把某个字段置 null（模拟"图没加载上"）。 */
+    static void nullField(Object o, String name){
+        Class<?> c = o.getClass();
+        while(c != null){
+            try{
+                java.lang.reflect.Field f = c.getDeclaredField(name);
+                f.setAccessible(true);
+                f.set(o, null);
+                return;
+            }catch(java.lang.NoSuchFieldException e){
+                c = c.getSuperclass();
+            }catch(Throwable ignored){
+                return;
+            }
+        }
     }
 
     /**

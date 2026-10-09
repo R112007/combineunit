@@ -348,11 +348,24 @@ verify/deliver.sh        # = 兼容安卓编译 + 检查调试残留 + 只把 ja
   照常开火。判定：2 cyclone + 2 duo（物品）+ 1 wave（液体对照）吸进舱，普通 / cheat / 无限资源
   三种规则各 600 tick，每种规则下 4 座物品炮台都必须开火。修后 8/8 PASS；拿旧包
   （`combinec/res/combineunit.jar`，Oct-8）跑同一套：`cheat=true cyclone=0 0 duo=0 0 wave=178` = FAIL。
-- **炮台绘制**：`MegaUnitEntity.drawTurrets(z)` 必须把炮台的层号抬到巨兽机身（`Layer.groundUnit` 60）
-  之上，否则本体/parts 落在 `Layer.turret`(50) 被机身盖住、只剩底板（用户报的"drawer 和 part 没画"）。
-  原版 `DrawTurret` 直接改它的 `turretLayer/shadowLayer/heatLayer`；模组常见的
-  `new DrawMulti(DrawRegion, new DrawTurret(){…})` 要走进 `DrawMulti.drawers` 抬**嵌套**的
-  `DrawTurret`（`raiseNestedTurretLayers`），画完还原（抽屉实例是方块上共享的）。
-  真客户端核对：`verify/run-client.sh mx /tmp/mp_unit/data turret` 的 `*_turret_clean.png`
+- **炮台绘制**（用户 2026-10-09 二报："drawer 就是没画，有的炮台轮廓线都没有，比如 cyclone"）：
+  `MegaUnitEntity.drawTurrets(z)` 要同时覆盖三层：
+  1. **层号**：炮台本体/parts 默认落在 `Layer.turret`(50)，低于巨兽机身（`Layer.groundUnit` 60）→ 被机身盖住，
+     看起来就是"只剩底板/整个没画"。原版 `DrawTurret` 直接改它的 `turretLayer/shadowLayer/heatLayer`；
+     模组常见的 `new DrawMulti(DrawRegion, new DrawTurret(){…})` 要走进 `DrawMulti.drawers` 抬**嵌套**的
+     `DrawTurret`（`raiseNestedTurretLayers`），画完还原（抽屉实例是方块上共享的）。
+  2. **组合方块副本**：装了 combine 时世界里的炮台是"组合方块接管了原版名字"的副本，副本的 drawer
+     在有些客户端上**一张图都没 load**（本机就复现不出来）。照 combine 的 `SuperTurret` 口径处理：
+     画的时候临时把 block 换成 `comboToOriginal` 里的原版实例（反射查 `combine.BlockCloner`，按类加载器缓存），
+     于是走原版那份加载好的抽屉（本体/液体/top/热量/描边/parts 全在）。
+  3. **兜底**：抽屉判据（同 `SuperTurret.cellDrawerIncomplete`：base/preview/top/outline/region 一张都没有，
+     或声明了要画图的 parts 一张图都没有）成立时，退回**整套图标** `drawTurretIcon()`——除了
+     `fullIcon/uiIcon/region`，还**按方块名直接查图集**（`block-<名字>-full` / `<名字>` / `<名字>-preview` / error），
+     因为副本方块连 fullIcon 都是空的，按名字查才是关键。
+
+  核对（真客户端）：`verify/run-client.sh mx /tmp/mp_unit/data turret` 的 `*_turret_clean.png`
   （对照行：同样的 duo/scatter/wave/cyclone 摆在吸收半径外，被吸进巨兽的那几座要和它们长得一样）；
   装饱和火力时（`/tmp/mp_sf2/data`）还会额外吸一座 `DrawMulti` 炮台（饱和火力-短波雷达）看嵌套绘制。
+  **确定性复现**：`-Ddrv.break=1` 会把舱里第一座炮台的 `drawer.base/preview/top/outline/liquid/heat` 与
+  `region/fullIcon/uiIcon` 全清空（= 用户机器上"抽屉一张图都没加载"的状态）再截图 ——
+  旧包（`combinec/res/combineunit.jar`）这一份连炮台带底板全没了；本版照样把整座炮台画出来。
