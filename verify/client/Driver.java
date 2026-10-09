@@ -1684,8 +1684,17 @@ public class Driver extends Mod{
             Log.info("[drv] turret: cyclone 放置=@", cyclone != null);
             // 【可选】-Ddrv.break=1：确定性地复现"组合副本的抽屉图一张都没加载"（用户机器上的状态），
             // 用来核对巨兽舱有没有把这种炮台画出来。默认关，免得常规截图里炮台是坏的。
-            if(Boolean.getBoolean("drv.break")) turretBreakDrawer();
+            if(breakWanted()) turretBreakDrawer();
         }catch(Throwable t){ Log.err("[drv] turretPlace failed", t); }
+    }
+
+    /** 复现"组合副本抽屉没图"的开关：`-Ddrv.break=1` 或环境变量 `DRV_BREAK=1`（后者不受启动器重排参数影响）。 */
+    static boolean breakWanted(){
+        try{
+            return Boolean.getBoolean("drv.break") || "1".equals(System.getenv("DRV_BREAK"));
+        }catch(Throwable t){
+            return false;
+        }
     }
 
     /**
@@ -1703,14 +1712,14 @@ public class Driver extends Mod{
      */
     static void turretBreakDrawer(){
         try{
-            if(turretBeast == null) return;
+            if(turretBeast == null){ Log.info("[drv] 模拟跳过: 没有巨兽"); return; }
             Object bay = turretBeast.getClass().getMethod("bay").invoke(turretBeast);
             @SuppressWarnings("unchecked")
             Seq<Building> all = (Seq<Building>)bay.getClass().getMethod("all").invoke(bay);
-            if(all.isEmpty()) return;
+            if(all.isEmpty()){ Log.info("[drv] 模拟跳过: 炮台舱为空"); return; }
             Building victim = all.first();
             Block real = victim.block;
-            if(real == null) return;
+            if(real == null){ Log.info("[drv] 模拟跳过: 第一座的 block 为空"); return; }
             boolean copy = false;
             try{
                 java.lang.reflect.Field f = Class.forName("combine.BlockCloner", true, ml).getField("comboToOriginal");
@@ -1724,11 +1733,14 @@ public class Driver extends Mod{
             nullField(real, "uiIcon");
             if(real instanceof mindustry.world.blocks.defense.turrets.Turret rt
                 && rt.drawer instanceof mindustry.world.draw.DrawTurret dt){
-                for(String f : new String[]{"base", "preview", "top", "outline", "liquid", "heat"})
+                // 【只清"本体/部件"的图，**保留 base**】—— 这才是用户报的"炮台只显示一个 base"：
+                // base 是按尺寸查的通用图（block-2 之类）永远找得到，而 region/preview 是按方块名查的，
+                // 组合副本在有些客户端上就是没有 → 画出底板、本体没画。
+                for(String f : new String[]{"preview", "top", "outline", "liquid", "heat"})
                     nullField(dt, f);
             }
-            Log.info("[drv] turret 模拟现场: 舱里这座 @ 是组合方块副本=@；已把它的 drawer/base+preview+top+outline+"
-                + "liquid+heat 与 region/fullIcon/uiIcon 全清空（= 用户机器上「抽屉一张图都没加载」的状态）→"
+            Log.info("[drv] turret 模拟现场: 舱里这座 @ 是组合方块副本=@；已把它的 drawer/preview+top+outline+"
+                + "liquid+heat 与 region/fullIcon/uiIcon 全清空（**保留 base** = 用户机器上「只剩底板」的状态）→"
                 + " 世界里同型号的炮台会变空白，巨兽舱里这一座应当**照样画出来**", real.name, copy);
         }catch(Throwable t){ Log.err("[drv] turretBreakDrawer failed", t); }
     }
