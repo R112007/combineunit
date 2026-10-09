@@ -27,6 +27,14 @@ public class MegaOrderPacket extends Packet{
     public boolean dropTurrets;
     /** true = 把附近的炮台吸收进巨兽体内；false = 把巨兽体内的炮台全部放回世界。 */
     public boolean absorbTurrets;
+    /** true = 只吸收 (turretX, turretY) 那一格上的那座炮台（"选取炮台 → 添加"）。 */
+    public boolean absorbTurretAt;
+    /** absorbTurretAt 时的目标格（服务端按格取建筑，客户端指哪都不算数）。 */
+    public int turretX = -1, turretY = -1;
+    /** true = 改"这座巨兽的炮台弹药禁用表"：ammoItem = 物品 id，ammoBanned = 用不用。 */
+    public boolean ammoTune;
+    public short ammoItem = -1;
+    public boolean ammoBanned;
     /** 目标单位的网络 id（融合 = 发起单位；解体 = 巨兽；编组时取第一个成员）。 */
     public int unitId;
     /** 框选操作（合体/编组）时的成员 id 列表；为空表示旧式"发起单位+周围全组合"。 */
@@ -51,6 +59,26 @@ public class MegaOrderPacket extends Packet{
         return p;
     }
 
+    /** 吸收**指定一格**上的那座炮台（"选取炮台"里点某座炮台的"添加"）。 */
+    public static MegaOrderPacket turretAt(Unit unit, int tileX, int tileY){
+        MegaOrderPacket p = new MegaOrderPacket();
+        p.absorbTurretAt = true;
+        p.unitId = unit == null ? -1 : unit.id();
+        p.turretX = tileX;
+        p.turretY = tileY;
+        return p;
+    }
+
+    /** 改炮台弹药禁用表（面板里勾"不用"某种弹药）。 */
+    public static MegaOrderPacket ammo(Unit unit, short itemId, boolean banned){
+        MegaOrderPacket p = new MegaOrderPacket();
+        p.ammoTune = true;
+        p.unitId = unit == null ? -1 : unit.id();
+        p.ammoItem = itemId;
+        p.ammoBanned = banned;
+        return p;
+    }
+
     @Override
     public void write(Writes write){
         write.bool(split);
@@ -58,6 +86,12 @@ public class MegaOrderPacket extends Packet{
         write.bool(ungroup);
         write.bool(absorbTurrets);
         write.bool(dropTurrets);
+        write.bool(absorbTurretAt);
+        write.i(turretX);
+        write.i(turretY);
+        write.bool(ammoTune);
+        write.s(ammoItem);
+        write.bool(ammoBanned);
         write.i(unitId);
         write.i(memberIds == null ? 0 : memberIds.length);
         if(memberIds != null){
@@ -72,6 +106,12 @@ public class MegaOrderPacket extends Packet{
         ungroup = read.bool();
         absorbTurrets = read.bool();
         dropTurrets = read.bool();
+        absorbTurretAt = read.bool();
+        turretX = read.i();
+        turretY = read.i();
+        ammoTune = read.bool();
+        ammoItem = read.s();
+        ammoBanned = read.bool();
         unitId = read.i();
         int n = Math.min(Math.max(read.i(), 0), 4096);
         memberIds = new int[n];
@@ -93,7 +133,19 @@ public class MegaOrderPacket extends Packet{
         // 只能对自己队伍的单位发号施令
         if(connection.player.team() != unit.team()) return;
 
-        if(absorbTurrets){
+        if(absorbTurretAt){
+            // 只吸收玩家点的那一座炮台（服务端重新校验格子/同队/半径）
+            if(unit instanceof MegaUnitEntity m) UnitComboMerge.absorbTurretAt(m, turretX, turretY);
+        }else if(ammoTune){
+            // 改"炮台弹药禁用表"：只认己方单位、物品必须真实存在
+            if(unit instanceof MegaUnitEntity m){
+                var item = mindustry.Vars.content.item(ammoItem & 0xFFFF);
+                if(item != null){
+                    if(ammoBanned) m.bay().bannedAmmo().add(item);
+                    else m.bay().bannedAmmo().remove(item);
+                }
+            }
+        }else if(absorbTurrets){
             // 追加附近炮台进巨兽体内
             if(unit instanceof MegaUnitEntity m) UnitComboMerge.absorbNearbyTurrets(m);
         }else if(dropTurrets){

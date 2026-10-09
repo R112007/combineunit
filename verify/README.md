@@ -18,7 +18,7 @@ verify/make-dataset.sh /tmp/mp_unit/data      # 产物 build/libs/combineunit.ja
 combine 的那一份，本仓库的改动根本没被验到。`run-headless.sh` / `run-client.sh` 只要看到
 `data/mods/combine.jar` 就直接拒绝（exit 4）。
 
-## 1. headless 逻辑测试（24 项）
+## 1. headless 逻辑测试（28 项）
 
 ```bash
 for t in SanityCheck MegaEnvTest MegaFieldTest MegaWaterTest MegaHoverTest MegaHoverPathTest MegaBigTest \
@@ -26,13 +26,24 @@ for t in SanityCheck MegaEnvTest MegaFieldTest MegaWaterTest MegaHoverTest MegaH
          MegaPossessLoadTest ScriptModCompatTest MegaFlightRuleTest \
          MegaStatSumTest MegaSurviveTest MegaSyncTest MegaGhostMemberTest MegaClipSizeTest \
          MegaGhostTest ComboFireSupportTest MegaNullControllerTest MegaNullTypeTest \
-         MegaBuilderAiNpeTest CoreUnitSyncTest; do
+         MegaBuilderAiNpeTest CoreUnitSyncTest MegaFlyingPathTest MegaHoverStuckTest \
+         MegaCampaignWaveTest MegaCampaignSweepTest MegaUserSaveWaveTest; do
   verify/run-headless.sh mx /tmp/mp_unit/data combineunit.dbg.$t
 done
 ```
 
+（`MegaCampaignWaveTest` / `MegaCampaignSweepTest` 要数据目录里同时有 combinec.jar，例如
+`verify/make-dataset.sh /tmp/mp_campc/data /root/combinec/build/libs/combinec.jar`；
+没有 combinec 时它们打印 SKIP 并 exit 0；`MegaCampaignSweepTest` 默认扫第 1~20 波，
+`-Dfrom=` / `-Dto=` 可改范围。）
+
 | 测试 | 验什么 |
 |---|---|
+| `MegaFlyingPathTest` | 用户报（组合战役 combinec）"**组合敌方波次之后，如果那一波里有一些别的类型的单位，合出来的组合巨兽不会向玩家核心进攻，而是停在原地**（tarFields 第 34 波）"。根因：派生类型的 `flowfieldPathType` 照抄原版 `initPathType()` 的"naval → **allowLegStep** → **flying** → hovering → ground"，把腿类排在飞行前面 —— 原版没问题是因为原版一个类型不可能同时是腿类和飞行，而派生类型是"成员能力的并集"（tarFields 那一波就是 spiroct 给腿 + horizon 给飞机）：巨兽能飞 → 每帧 `elevation` 钉在 1、**永远悬空**（悬空不撞墙，所以它经常就悬在天然岩壁/悬崖那一格上），却拿着腿类的代价表 —— `costLegs` 对天然岩壁返回 impassable，流场在自己脚下就是 -1，`Pathfinder.getTargetTile` 把"当前格"当下一格返回、`AIController.pathfind` 见 `tile == targetTile` 立刻 return：**一步都不走**，而且不离开这格就永远走不了。修法：流场代价类型的优先级里飞行提到腿类前面（原版飞行单位本来就是 `flying → costNone`：全图平坦代价、格子永远可达），腿类只在**不能飞**的编组里生效。判定：①口径钉子 —— 天然岩壁格 `costLegs=-1 / costNone=1`；②能飞+有腿 → `flowfieldPathType=costNone`，纯腿仍 `costLegs`、纯陆地仍 `costGround`（能力没被一起改掉）；③**复现 + 修复**：把能飞+有腿的巨兽摆在天然岩壁上，先按旧行为强制 `costLegs` → 900 tick 位移 1px、速度 0.00（复现用户报的现象），恢复 `costNone` 后 900 tick 从 1846px 逼近到 1015px；④顺带钉住指挥模式（CommandAI + ControlPathfinder）那条路没被改坏：原版 flare 悬在岩壁上被指挥走 1587px、巨兽 657px（速度 1.05 × 600 tick） |
+| `MegaHoverStuckTest` | 任意 | 用户补报"**tarFields 第 10 波也出现同样的问题**"。第 10 波是 `nova×3 + crawler×6` —— **nova 带 canBoost**，派生类型继承 canBoost（`ct.canBoost = anyBoostMember && !ct.flying`），原版 `updateBoosting()` 在**实心格**上让它自动升空（`shouldBoost = boost \|\| onSolid() \|\| ...`）→ `isFlying()=true`、`solidity()=null` 所以活着，而它的流场是 costGround（天然岩壁 = impassable）→ 自己脚下这格权重 -1 → `AIController.pathfind` 每帧直接 return = 停在原地。修法：新增 `combineunit.units.mega.MegaGroundAI`（巨兽的 `aiController`）—— 流场给出死路（下一格 == 当前格）时**直接朝最近的敌方核心推进**，脱困后流场照常接管；正常路径完全走原版逻辑（地貌绕行不受影响）。判定是同一只巨兽、同一格岩壁下的 A/B：控制器换上原版 `GroundAI`（=修复前）600 tick 只推进 5px、速度 0.00；换回 `MegaGroundAI` 同一只推进 466px（947→495 距核心）；对照（mace+dagger，不能悬空）落在实心格上被原版当帧清掉（原版行为，不会"停在原地"）|
+| `MegaCampaignWaveTest` | **要同时装 combinec + combineunit**（`verify/make-dataset.sh /tmp/mp_campc/data /root/combinec/build/libs/combinec.jar`；数据目录里没有 combinec.jar 就打印 SKIP 并 exit 0） | 上面那条的**端到端**钉子：读真的战役扇区 `SectorPresets.tarFields`，打印第 30~45 波的原版阵容（第 33 波 `mace×8 spiroct×5 horizon×14 atrax×3` = 腿类 + 飞行），用原版 `Logic.runWave()` 刷那一波（**combinec 的 WaveMerger 在 WaveEvent 里合体**），然后看合出来的巨兽有没有朝玩家核心推进：实测巨兽 `horizon×14, mace×8, spiroct×5, atrax×3`、`flying=true`、`flowfieldPathType=costNone`、控制器 GroundAI，1500 tick 距核心 **1776 → 376px**（修前：速度恒为 0.00、距核心几乎不变） |
+| `MegaCampaignSweepTest` | **要同时装 combinec**（同上；没有 combinec 时 SKIP） | 逐波扫 tarFields（默认第 1~20 波，`-Dfrom=` / `-Dto=` 可改）：每一波都用原版 `Logic.runWave()` 刷出来（combinec 合体），逐波打印阵容、巨兽构成、`flying`/`allowLegStep`/`flowfieldPathType`、脚下格子、以及 400 tick 里 距核心 的变化，并要求**每一波的巨兽都朝核心推进**。用户报的两波都在里面：第 10 波 `nova×3 crawler×6`（1632→1320）、第 33 波 `mace×8 spiroct×5 horizon×14 atrax×3`。用途是抓"某一波又冒出新的停在原地"|
+| `MegaUserSaveWaveTest` | **要用户自己的 tarFields 存档** `<数据目录>/saves/sector-serpulo-99.msav`（+ combineunit + combinec；没有存档就 SKIP） | 用户补报"**第 9 波也是这样**""**第 21 波也不动了**"后，用他在 tarFields（内部名 `焦油田`，260×260、液面比 0.126 → 非海军图）打到第 40 波的那份存档，在**他的图**上复现。**A/B**：第 9 / 33 波（`mace×2 spiroct×1(腿) horizon×2(飞)` / `mace×8 spiroct×5(腿) horizon×14(飞) atrax×3(腿)`）**修复前**（原版 `GroundAI` + 原版 `initPathType` 优先级，腿类排在飞行前面）出生点正好在天然岩壁（`sand-wall` + 深水）上 → 2400 tick **速度恒为 0.00、推进只有 3px / 5px**（用户报的"停在原地"原样复现）；**修复后**（`costNone` + `MegaGroundAI`）同样 2400 tick → 推进 **1708px / 1767px**、到核心跟前。**逐波扫**：同一张图把第 1~45 波全刷一遍（每波 300 tick，`-D` 可改范围），要求**没有任何一波停在原地** —— 实测 42 只巨兽、0 停在原地，含用户报的第 21 波 `mace×5 spiroct×3(腿) horizon×8(飞)`（推进 285px、`cost=costNone`、`MegaGroundAI`）。第 10 / 34 波在用户图这个出生点上两条口径都能走（走到基地火力圈里被打掉），只打印现场；canBoost 悬空那条链由 `MegaHoverStuckTest` 钉 |
 | `SanityCheck` | 防呆：模组真的加载、三种巨兽类型建出来了、巨兽实体类登记在**固定槽 250**、原版单位实体被换成本仓库的镜像类（`dagger` → `combineunit.units.entities.CMechUnit`）。每个 run-headless 前自动跑 |
 | `CoreUnitSyncTest` | 用户报"**联机时客户端生成不出核心机，一直处于无法建造的状态**"：镜像实体比原版 `writeSync/readSync` 多 8 字节 comboId，而"核心机不换构造器"那次修复只改了构造器、没改 **EntityMapping**（网络重建/存档读回按 classId 走的那张表）—— 服务端按原版格式写、客户端按镜像格式读，整包实体快照 EOF 被丢掉（真联机日志：`EOFException at CUnitEntityLegacyGamma.readSync`，一次跑刷 309 条），核心机所在快照全丢 → 客户端拿不到自己的核心机。判定：**每个单位类型**"服务端 `type.constructor` 造出来的类"必须 == "客户端按 classId 从 EntityMapping 建出来的类"（同一个 classId 只能有一种字节格式）；塞普罗核心机 alpha/beta/gamma 两端都必须是原版类（与作弊模组兼容那条修复的钉子），埃里克尔核心机（evoke/incite/emanate，与 mega/quell/disrupt 共用 `PayloadUnit`）必须与共用该类的普通单位同类且两端一致；另做一次 `writeUnitContainer → readUnitContainer` 的真实字节往返。修前 10 项 FAIL（含 3 次 EOFException），修后 11/11 PASS |
 | `MegaEnvTest` | 埃里克尔地图（`Env.scorching\|terrestrial`）上合体不环境死亡：占位类型支持该环境、派生类型按成员推导（`envDisabled` 不含 scorching）、2 秒后仍存活 |
@@ -45,7 +56,7 @@ done
 | `MegaTankTest` | 任意 | 用户问的"**坦克合体后的履带绘制和碾压伤害还在吗**"：履带绘制在（`MegaUnitType.drawAttachments` 的 `ATT_TANK` → 原版 `drawTank`，滚动相位由 `MegaUnitEntity.updateAttachments` 维护，真客户端 `094_tank_mega.png` 里履带清清楚楚），**碾压伤害确实丢了** —— 原版碾压在 `TankComp.update()` 里（生成类 `TankUnit implements ... Tankc`），而巨兽继承的是普通 `UnitEntity`（`UnitEntity implements ... Unitc, Velc, Weaponsc`，**没有 Tankc/TankComp**），`super.update()` 里根本没这段；派生类型也从没推导 `crushDamage`/`crushFragile`。修法：派生类型按成员**伤害取最大、脆弱取并集**；实体 `updateCrush()` 照抄原版那段（身周 8 格的敌方脆弱方块秒碎；`r = hitSize×0.75/tilesize`、判定 `r-1` 格内的敌方建筑按 `crushDamage×Δt×方块倍率×unitDamage` 掉血、可踩碎的方块直接拆），飞在空中/被缴械时不碾；履带扬尘 + 滚动音也补上了（尺寸按体型缩放）。实测（该数据集）：vanquish hitSize=28 crushDamage=2.6、conquer hitSize=46 crushDamage=5；两台坦克巨兽 `crushDamage=2.6`、混编（2 vanquish + conquer）取最大 `5.0`；碾压场景把敌方铜墙放在斜对角 `r-1` 格（斜距 28px > 碰撞半径 23px，够得着又不重叠）：原版 conquer 掉血 320（320→0）、坦克巨兽（hitSize=60.7、r=5）同样 320→0、机甲巨兽 0；敌方脆弱方块（bridge-conveyor）被秒碎；履带相位 60 tick 涨了 36 |
 | `MegaPlayerFireTest` | **需要装了饱和火力模组的数据集**（否则打印"跳过"并 exit 0） | 用户报"电脑端合体 3 个饱和火力模组的单位神渎后，在**玩家控制**时无法攻击"。本测试把 3 只神渎（`饱和火力-神渎`，hitSize=88、5 把武器：神渎1/神渎2 两对镜像 + 神渎0 正中单门，全是 `rotate=false`）合体，然后**模拟玩家开火输入**（`unit.aim(...)` + `unit.controlWeapons(true, true)`，即 DesktopInput.updateMovement 的尾巴）跑 60 tick，数每把武器的 `totalShots`。实测：单只神渎 649 发；巨兽 15 个挂载共 1947 发（= 3×649，每把可控武器都开过火）。真客户端另有 `sf` 模式（`verify/run-client.sh mx <数据集> sf`）走**原版 DesktopInput 自己的输入路径**（只把 `player.shooting` 置真），实测 `input.canShoot()=true`、`isFlying=false`、`Mechc=false`、`canBoost/omniMovement/faceTarget/hasWeapons=true`，15 个挂载全部 `shoot=true`、累计 12015 发，截图 `096_sf_fire.png`（自制输入）/`098_sf_hold.png`（原版输入路径）—— 也就是**当前版本复现不出"玩家控制时无法攻击"**，这条测试作为回归钉子留着 |
 | `MegaBoostTest` | 任意 | 用户报的三条同源问题："**陆辅有助推，在组合巨兽里会变内鬼**"、"**在空中时整个巨兽都不能攻击了**"、"**组了空军后会固定飞天，整个巨兽直接瘫痪**"。根因全在原版这两行：`UnitComp.canShoot() = !disarmed && !(type.canBoost && isFlying())`（**带助推的类型只要离地就不能开火**，而 `isFlying()` 的门槛只有 `elevation >= 0.09`）、`UnitComp.updateBoosting(): shouldBoost = boost \|\| onSolid() \|\| (isFlying() && !canLand())`（撞到实心方块、或悬在别的落地单位上方就会自己往上飘）—— 而派生类型以前**继承了成员的 canBoost**，于是①带助推的成员一进编组，巨兽自己升空 → 整只打不出东西（"内鬼"）；②有飞行成员的编组本来就固定悬空 → 永久 `canShoot()=false`（"瘫痪"）。修法：派生类型恒 `canBoost=false`，飞不飞完全由巨兽自己的模型决定（有飞行成员才飞）。测试（给 dagger 手动加 canBoost 模拟"陆辅"、flare 当空军）：对照——原版带助推单位按 60 tick 助推后 `elevation=1.00 / isFlying=true / canShoot=false`；陆地巨兽 `type.canBoost=false`、按着助推仍 `elevation=0.00`、`canShoot=true`、打出 10 发；空军巨兽 `hasFlyer=true / isFlying=true / canBoost=false / canShoot=true`、空中打出 13 发。把 `ct.canBoost` 改回继承（旧行为）复跑：地面巨兽被顶到 `elevation=0.95 / canShoot=false`、空军巨兽空中 **0 发**，6 条断言集体变红 = 钉子有效 |
-| `MegaPossessLoadTest` | 任意 | 用户报"**附身组合巨兽身上后退出地图后重新进去，不能攻击，得重新附身才行**"。根因链：`SaveIO.load` → `Logic.reset()` → **`Groups.clear()` 把玩家也清了** → `UnitEntity.read()` 里 `TypeIO.readController` 读到"玩家控制器"却 `Groups.player.getByID(id)` 找不到人 → 原版 `return prev`（null）→ 我们"controller==null 就按类型造一个"的兜底给巨兽塞上 **AI 控制器** → `AIController.updateWeapons()` 每帧复位 `mount.shoot/mount.rotate`，玩家的开火输入全被覆盖（重新附身 = `unit.controller(player)`，AI 不再跑，所以又能打）。修法：存档块升到**版本 4**，额外记下附身者的 **id + 名字**；读档后 `restoreOwner()` 每 20 tick 重试（原版客户端要到 WorldLoadEvent 才 `player.add()`），找到就把玩家重新挂上（`owner.unit(this)`），最多等 5 分钟，等不到保持原版行为。实测（dagger×2 合体、造一个 Player 附身、`SaveIO.save` → `SaveIO.load`）：修后读档 `控制器=Player`、`owner.unit()=巨兽`、开火输入 4/4 把 `shoot=true`、打出 46 发；关掉 `tickRestoreOwner()`（旧行为）复跑：`控制器=CommandAI`、`owner.unit()=null`、**0/4 把 shoot、0 发**，重新附身之后才恢复（10 发）—— 4 条断言变红 = 钉子有效 |
+| `MegaPossessLoadTest` | 任意 | 用户报"**附身组合巨兽身上后退出地图后重新进去，不能攻击，得重新附身才行**"（2026-10-08 又补了一次）。根因链：`SaveIO.load` → `Logic.reset()` → **`Groups.clear()` 把玩家也清了** → `UnitEntity.read()` 里 `TypeIO.readController` 读到"玩家控制器"却 `Groups.player.getByID(id)` 找不到人 → 原版 `return prev`（null）→ 我们"controller==null 就按类型造一个"的兜底给巨兽塞上 **AI 控制器** → `AIController.updateWeapons()` 每帧复位 `mount.shoot/mount.rotate`，玩家的开火输入全被覆盖（重新附身 = `unit.controller(player)`，AI 不再跑，所以又能打）。修法：存档块升到**版本 4**，额外记下附身者的 **id + 名字**；读档后 `restoreOwner()` 每 20 tick 重试（原版客户端要到 WorldLoadEvent 才 `player.add()`）。**2026-10-08 加固**：①找附身者时**本机玩家 `Vars.player` 优先**（原版存档根本不写 Player 实体，`Groups.player` 里那份副本挂上了也没用——输入只认 `Vars.player`）；②单位已经在玩家名下但控制器不是玩家（`Groups.clear` 的 `PlayerComp.remove → clearUnit → unit.resetController()` 会把它换成 AI）时**直接 `controller(owner)`**（`PlayerComp.unit()` 见"已经是这个单位"会提前 return，光调它没用）；③读档后 **5 秒窗口内每 20 tick 复核一遍**（读档是一串步骤：Groups.clear → 读地图时 WorldLoadEvent 里 `player.add()` → 读实体 → 读档后玩家没单位时核心机还会补一台），谁把这对关系掀掉都能补回来，窗口过了就收手不抢玩家自己选的单位。实测（dagger×2 合体、造一个 Player 附身、`SaveIO.save` → `SaveIO.load`）：读档 `控制器=Player`、`owner.unit()=巨兽`、4/4 把 `shoot=true`、打出 46 发；**故意把玩家的单位掀掉**（`owner.unit(null)` = 模拟读档流程后半段）后 30 tick 内自动补回（控制器=Player）；再重新附身也照旧能打。关掉 `tickRestoreOwner()`（旧行为）复跑：`控制器=CommandAI`、`owner.unit()=null`、0/4 把 shoot、0 发。10/10 PASS |
 | `ScriptModCompatTest` | 任意（要真验需要带 `verify/mods/ctcompat` 的数据集，否则打印"跳过"并 exit 0） | 用户报"**组合单位和 CT系统(1.75)/CT2起源(5.30) 冲突**"，崩溃日志 `1 (1).txt`：`Error loading mod combineunit` / `Failed to define class` / `Suppressed: NoClassDefFoundError: Failed resolution of: Lcombineunit/units/entities/CUnitEntity`，调用链是 `creators/T6.js:7 → rhino.JavaAdapter → combineunit…replaceUnitConstructors`。根因：CT2起源 的脚本有 27 处这种写法 `MyUnit.constructor = prov(() => extend(UnitTypes.<原版>.constructor.get().class, {}));` —— **拿原版单位构造器产出实例的 class 当超类**；我们把原版构造器换成镜像类之后它就继承了**模组类**，而安卓上 Rhino 的 JavaAdapter 在内存 dex 里定义适配器、其类加载器的父级只有游戏类加载器，**看不见别的模组（含我们）的类** → 定义失败 → 异常从 `register()` 抛出 → 整个 combineunit 加载失败、游戏崩。修法（`UnitComboDamage`）：①**两阶段**替换（先把所有类型取样、脚本适配器都在"原版构造器还都在"时建好并被 Rhino 缓存，之后才统一替换）；②镜像构造器**脚本感知**：执行别的模组的脚本构造器期间返回**原版实例**，脚本那句 `extend(...)` 拿到的就是游戏自己的类；游戏自己创建单位时才返回镜像（`replaceEntityMapping` 同样处理）；③**世界加载后补扫**：有的模组是进世界时才设构造器的（那时我们已经替换过一轮），扫到"既不是我们装的、也不是我们见过的原版构造器"就包上同样的标记（只比对象身份、**不取样**——取样会真的执行那个脚本构造器，正是安卓上会失败的地方）。CT 那两个模组是 **dex-only（安卓包）**，桌面 JVM 读不了 `classes.dex`，所以用 verify 自带的等价最小 JS 模组 `verify/mods/ctcompat/`（写法一模一样，另加一个"进世界时才设构造器"的单位）复现。实测 11 项：`ctcompat-unit` 的实体类 = `adapter3 ← UnitEntity ← Unit`、进世界时才设的 `ctcompat-late-unit` = `adapter5 ← LegsUnit ← Unit`（**都是游戏类**，链条里没有 combineunit 镜像）、能量产/入世界；原版 dagger 仍是 `CMechUnit`（ComboUnit，承伤共享照旧）。把"脚本感知"改回旧写法复跑：复现单位构造直接抛 `NoClassDefFoundError: combineunit/units/entities/CUnitEntity`（**和用户日志里那行一模一样**），断言变红 = 钉子有效 |
 | `MegaFlightRuleTest` | 任意 | 用户 2026-09-25 改的口径：**只要单位组里有飞机，组合巨兽就能飞**（推翻 `~/sd/组合单位.txt` 里早期那句"Σ飞行 hitSize > Σ地面 hitSize 才能飞"）。中间那版按早期设计稿实现成"两边 hitSize 之和比大小"，结果"1 架小飞机 + 2 台坦克"落地（用户先报了"组了空军后固定飞天瘫痪"，但那条的根因是 `canBoost` 被继承，已由派生类型 `canBoost=false` 根治，见 MegaBoostTest）。现在 `canFly = 组里有没有飞行成员`，**同一个判定**驱动派生类型的 `flying`、引擎（`hoverEngines`）、寻路代价（`pathCost`/`flowfieldPathType`）、`moveMode()` 与每帧 elevation 驱动（`update()` 里能飞就钉在 1）。四种构成实测：2×dagger（不飞，moveMode=0，elevation 0，引擎 0）、**2×dagger+1×flare（9 的 flare 一架 → 飞，type.flying=true、moveMode=2、elevation 1.00、引擎 1 个）**、2×flare+1×dagger（飞）、2×flare（飞），四种都能开火（canShoot=true）。顺带补上 `flowfieldPathType`（原版 initPathType 里也按同一优先级指定；巨兽类型 late 注册从没跑过 init，停在 -1 时 `AIController.pathfind` 会拿 -1 当 cost 类型找流场 → 没指令的巨兽不会自己走） |
 | `MegaHoverPathTest` | 任意 | 用户报"**ElevationMoveUnit 组合后的 ai 有问题：指挥模式下不能操控它移动到液体上，得手动控制才行**"。用户的怀疑（"ElevationMoveUnit 的 ai 和其它单位不同"）是对的：原版 `UnitType.initPathType()` 给悬浮单位（`type.hovering`，例如 elude）发的是 `costHover`（液体照走），给普通地面单位发的是 `costGround`（`PathTile.allDeep ? impassable`）；派生类型的 pathCost 以前只判"有陆地/海军/飞行成员"，悬浮成员被算成陆地 → 发 `costGround` → `CommandAI` 调 `ControlPathfinder.getPathPosition` 时目标深水格不可达（`move=false`），一步都不走。修法：按**派生类型自己的字段**重演 `initPathType()`（naval → legs → flying → hovering → ground），其中"能不能进深水"用 `!ct.canDrown` 判定（**不能**用 `ct.hovering`：机甲/履带/腿的实体类 `MechUnit`/`TankUnit` 本身就 `implements ElevationMovec`，用它会把手会淹死的纯机甲巨兽也发成 hover 代价）。测试现场铺一个 6×6 深水湖（铺完必须整片 `pathfinder.updateTile` 重打包，否则后铺的格子 `allDeep` 停在 false），量四件事：①口径钉子 —— `ControlPathfinder` 的 costGround 对湖心格 = **-1（impassable）**、costHover = 1；②原版 elude 自己的 `pathCostId=1`、`flowfieldPathType=5`（对照）；③2×elude 巨兽 `hovering=true / canDrown=false / pathCostId=costIdHover / flowfieldPathType=costHover`，**行为**：指挥模式下下移动指令后第 139 tick 进入深水格、第 155 tick 抵达湖心（脚下深水=true、距湖心 12px）；④对照 2×dagger 巨兽 `pathCostId=costIdGround`、cost 表对深水 = -1，同样指令下 1500 tick 都不进深水（停在 88px 外）—— 能力没被无差别放开 |
@@ -59,7 +70,9 @@ done
 | `ComboFireSupportTest`（+ combine 仓库的 `combine.dbg.MegaRepairFireTest`） | 借火只许打敌方目标：维修/建造武器跟踪的是**己方建筑**、玩家长按维修时瞄准点也压在自家房子上，照着打就会把同组其他成员的武器引到己方建筑上（用户报的"mega 武器去修复建筑的时候，其他武器的开火会损坏己方建筑"）。实测修前己方半血墙被借火打 14 发，修后己方目标/瞄准点 0 发、敌方目标照常 14 发；巨兽自己 `groupable=false`（不参与借火） |
 | `MegaClipSizeTest` | 给巨兽排建造计划后 `clipSize` 不崩（视口裁剪用） |
 | `MegaGhostTest` | 合体后不是本地幽灵、控制器/指令表/姿态齐全、移动指令生效、解体后成员回世界、编组入口（comboId）行为 |
-| `MegaTurretTest` | **组合炮台**（合体时把附近炮台吸收进巨兽体内的小 World）：①合体吸收脚下的 duo+scatter 两座、吸收半径外的远处炮台不动、被吸收的从世界里消失；②炮台随巨兽转向（`Angles.trns(rotation-90)` 投影，转向后仍在身上）；③**物品炮台的子弹从核心里扣**（实测核心铜 4992→4988、场上出现 duo 的弹体）且真的开火；④释放（放出 2 座、落回巨兽附近的世界）/追加吸收（`absorbNearbyTurrets`）往返；⑤解体后炮台跟着放回（世界里建筑数 2→4）；⑥**快照字节**（155B）与**存档字节**（452B）两端往返都能重建成员+炮台；⑦**空舱**快照（150B）不炸；⑧**发布版老存档**（`saves/17.msav`，没有炮台段）照样读得进去（读回 4 只巨兽）。23/23 PASS |
+| `MegaIdleFireTest` | 巨兽放原地不动、敌方匀速从侧上方路过：逐 tick 采样机身 rotation / 每把 mount 的 rotate,shoot,targetRot,totalShots / 舱里炮台开火数 —— 用来钉"一直索敌抽搐不攻击"（见下面」机身转向」那段） |
+| `MegaTurretFireTest` | **要装炮台模组才有意义**（例如饱和火力：`verify/make-dataset.sh /tmp/mp_sf2/data /root/sd/饱和火力3.4.4.3.jar`）：逐个吸收每种炮台、铺靶子跑 3000 tick，统计开火率（诊断工具，默认 exit 0；修后 43/44）。另有 `MegaTurretScanTest`：列出所有炮台方块的 drawer/parts/弹药/heatReq 现场 |
+| `MegaTurretTest` | **组合炮台**（手动"选取炮台 → 添加"把炮台收进巨兽体内的小 World）：①**合体不再自动吸收**脚下的炮台（用户 2026-10-08 要求改成手动挑选）；①b**舱位上限 = 成员武器数之和**（4 只 dagger → mounts=8 → 上限 8；2 只 dagger → 上限 4，逐座点 5 座只能进 4 座、第 5 座返回 false 且仍留在世界里）；②`absorbTurretAt` 点哪座吸哪座（没点的还在世界里、半径外的点不动 = 服务端重新校验）；③**布局和武器同一套口径（圆环）**：两侧落在同一个圆环上（4 座同尺寸实测中心距全是 17.8885px、左右严格镜像）、奇数座多出来的那座在正中间（3 座混编：半径 20.4/24.0、中间 1 座）；④炮台随巨兽转向；⑤**物品炮台的子弹从核心里扣**（实测核心铜 4992→4988、场上出现 duo 的弹体）且真的开火；⑥**玩家操控巨兽时舱里的炮台听玩家的鼠标**（用户问的"为什么不能控制炮台转向和开火"）：玩家朝正上瞄 150 tick → duo 朝向 `265.7°` = 玩家鼠标方向（它自己的 AI 目标是 `8°` 右边的敌人）、开火 9→17；松手后放一只新敌人 → 200 tick 后 duo 转向 `101.3°` = 自己的 AI 目标，回到自主索敌；⑦释放（放出 3 座）/批量吸收往返；⑧解体后炮台跟着放回；⑨**快照字节**（218B）与**存档字节**（834B，4 成员 4 炮台）两端往返都能重建成员+炮台；⑩**空舱**快照（150B）不炸；⑪**发布版老存档**（`saves/17.msav`，没有炮台段）照样读得进去（读回 4 只巨兽）；⑫**联机包**`MegaOrderPacket.turretAt` 写读往返（22 字节）；⑬**弹药循环/核心没货不发射/面板禁用**（duo 三种弹药全出现→只剩一种→全清零弹仓恒 0→勾掉一种只剩另一种，且 `ammoList`/`bannedAmmo` 面板读得到）。55/55 PASS |
 | （UI 约定，无单独用例） | 合成单位菜单 (`UnitComboBind`) 里点了会改内容的按钮时，**弹窗重画必须延后一帧**（只置 `rebuildQueued`，下一帧 `tick` 再 `hide()+openDialog()`）：arc 的点击回调还在 input 派发栈上，当场 `dialog.cont.clear()` 会把正在派发的按钮/pane 从场景里摘掉，arc 随后 `getScene().addTouchFocus(...)` 直接 NPE 崩游戏（用户 2026-09-29 崩溃；combine 那边的设置列表、`ComboInputGuard` 兜底见 combine 仓库 README） |
 | `MegaBuilderAiNpeTest` | 用户安卓崩溃 `BuilderAI.useFallback` 读 `unit.team` NPE（`CommandAI.updateUnit → 命令控制器 BuilderAI`）：巨兽的控制器是"半成品"（`controller != null` 但 `unit == null`，网络读回来的 CommandAI / 读快照中途异常的残留）时，挂着成员带来的 `rebuild`/`assist` 建造指令（poly 这类工程单位）那一帧必崩。判定：这种状态 tick 不抛异常、且当帧把控制器挂回巨兽（`ensureController` 不再只判 `controller == null`）。修前 2 项 FAIL（复现同款 NPE），修后 5/5 PASS |
 | `ComboFireSupportTest` | 组合火力共享不借治疗类武器代打（带治疗的弹体必须为 0），自己的武器照常开火 |
@@ -78,6 +91,7 @@ verify/run-client.sh mx /tmp/mp_unit/data shipmega   # 两艘 risso 在深水里
 verify/run-client.sh mx /tmp/mp_unit/data flight     # 2×dagger（该贴地）vs 2×dagger+1×flare（有飞机该悬空）
 verify/run-client.sh mx /tmp/mp_unit/data engines    # 原版 avert vs 2×avert 巨兽（多引擎成员的喷口）
 verify/run-client.sh mx /tmp/mp_unit/data turret     # 组合炮台：合体吸收 duo/scatter/wave，摆在巨兽身上、随朝向转
+verify/run-client.sh mx /tmp/mp_unit/data possess    # 附身巨兽 → 存盘 → 读档 → 还能不能开火 / 舱内炮台听不听玩家
 ```
 
 截图落在 `~/sd/shots/`（脚本自动建目录、文件名带跨次运行的连续序号 `001_` `002_`…），
@@ -96,7 +110,8 @@ verify/run-client.sh mx /tmp/mp_unit/data turret     # 组合炮台：合体吸�
 | shipmega | `*_ship_mega.png` | 巨兽浮在深水上、地形速度系数和原版船一致（1.3） |
 | flight | `*_flight_rule.png` | "有飞机就飞"：同一张图里左边 2×dagger（贴地、无引擎）、右边 2×dagger+1×flare（悬空、画出引擎尾焰、体型按综合 hitSize 放大）。日志同时打印两边的 `type.flying/elevation/isFlying/canShoot` —— 实测纯地面 `flying=false elevation=0.0 isFlying=false`，带一架 flare `flying=true elevation=1.0 isFlying=true` |
 | engines | `*_engines_mega.png` | 多引擎成员：原版 avert（`setEnginesMirror` 摆的 4 个喷口、`engineSize=0`）的喷口要**整套**照抄到巨兽身上（原来只画居中一个）。日志逐个数：参考 avert `engines=4 → (9,-9 r3.0 315°) (-9,-9 r3.0 225°) (10,-4 r3.0 315°) (-10,-4 r3.0 225°)`；2×avert 巨兽 `hitSize=16.97 elevation=1.0 isFlying=true engines=4 → (12,-13 r4.2) (-12,-13 r4.2) (14,-6 r4.2) (-14,-6 r4.2)`（= 参考 ×1.414，朝向不变）。截图 `214_engines_mega.png` 里巨兽身上有 4 个喷口尾焰（原版 avert 参照那只在左下，和齿轮按钮有点重叠） |
-| turret | `*_turret_rot90/rot0.png` `*_turret_panel.png` | **组合炮台**：两只 vanquish 合体后，在巨兽旁边摆 duo/scatter/wave 三座炮台再 `absorbNearbyTurrets` —— 看炮台有没有画在巨兽身上、有没有飞出身体、随巨兽朝向变化（日志逐座打 `相对巨兽 dx/dy`：rotation 90→0 时坐标变了）；液体炮台（wave）直接补给（日志 `液体=9.0`）。面板那张看 `组合巨兽 … 炮台 3 座（…）` 那行 + 「追加附近炮台」「释放全部炮台」两个按钮。实测截图 `304/305_turret_rot90/rot0.png`、`306_turret_panel.png` |
+| turret | `*_turret_rot90/rot0.png` `*_turret_pick.png` `*_turret_pick_added.png` `*_turret_panel.png` | **组合炮台**：两只 vanquish 合体后，duo/scatter/wave 三座炮台经 `absorbNearbyTurrets` 收进体内 —— ①**炮台本体/parts 画出来没有**（修前 `b.draw()` 的炮台主体落在 `Layer.turret`(50)、被画在 `groundUnit`(60) 的巨兽机身盖住，玩家只看得见一堆方底座 = 用户报的"只画base"；现在绘制层临时抬到机身之上），②位置对不对（日志逐座打 `相对巨兽 dx/dy`；rotation 90→0 坐标跟着转），③液体炮台（wave）直接补给（日志 `液体=9.0`）。`turret_pick` 那张是**手动选取流程**：世界里再摆 duo/scatter/wave 三座 → `MegaTurretPicker.show()` → 巨兽头上「完成选取」+ 每座炮台上一个「添加」；`turret_pick_added` 是点了 scatter 的「添加」之后（炮台舱 4 座、那颗按钮消失、剩下两颗还在）。面板那张看 `组合巨兽 … 炮台 N 座（…）` 那行 + 「选取炮台」「释放全部炮台」两个按钮（`选取炮台` 走和浮标同一条路）。**按钮位置**：`添加` 必须正压在对应炮台正上方 —— 驱动会把每颗按钮的实际坐标打进日志（`"添加"[i] 按钮底边=(x,y) …`），实测 900×700/3 倍缩放下炮台投影 `(396,380)` → 按钮底边 `y=359`、中心 `x=396`（正好在 2×2 炮台上缘之上）。实测截图 `014~018_turret_*.png`（`016_turret_pick.png` 是选取模式那张） |
+| possess | `*_possess_after_load.png` | **附身 + 存盘 + 读档**（用户报"附身在组合巨兽身上读写后就不能控制巨兽攻击了，得重新附身"）：融合两只 vanquish → `Vars.player.unit(mega)` → 同步推 120 tick 玩家按住开火（实测打出 16 发）→ `SaveIO.save` → `SaveIO.load`（和暂停菜单"载入"同一条路）→ 再推 tick。日志逐项打 `Vars.player.unit()` / 巨兽控制器 / `player.shooting` / 每把武器 `shoot,rotate,totalShots`，以及**舱内炮台**的 `朝向 vs 玩家鼠标方向`。实测读档后 `玩家单位==巨兽=true 控制器=Player#0`、巨兽继续开火（累计 24 发）；舱内 duo `朝向=90° = 玩家鼠标方向 90°（差 0°）`、`logicControlTime=119`、开火 0→10。实测截图 `013_possess_after_load.png` |
 
 驱动 mod（`verify/client/Driver.java`）的模式场景是从 combine 仓库搬过来的（拆仓后单位侧只在本仓库）；
 建筑侧那些模式（设置列表/CoopPanel/电网/科技树…）留在 combine 仓库的 Driver 里。
@@ -134,11 +149,148 @@ verify/run-client.sh mx /tmp/mp_unit/data turret     # 组合炮台：合体吸�
 （这批量测说明：只看"子弹类型/首帧瞄准点/转向量"看不出问题 —— 问题在**枪口布局**上，
 得量"镜像搭档的相对位置"。）
 
-## 组合炮台（合体吸收附近炮台）：实现与那个**存档字节错位**的坑
+## 组合炮台（手动"选取炮台 → 添加"）：实现、布局、绘制层与那个**存档字节错位**的坑
 
-用户要求：组合巨兽合体时把附近的炮台一起组合进来，炮台摆在巨兽内部的 World 里
-（参考 `~/sd/q/WorldUnit.java`）；物品炮台的子弹从队伍核心里扣，液体/电力类炮台直接补给；
-支持解体放回炮台、追加新炮台。
+用户要求（2026-10-08 更新口径）：**合体不再自动把附近炮台吸进来**，改成
+> 点组合巨兽 → 巨兽头上出现「选取炮台」按钮 → 点它进入选取模式（附近每座可吸收的炮台各画一个
+> 「添加」按钮）→ 点某座炮台的「添加」→ 那座炮台被吸进巨兽体内。
+
+（更早那版是"合体时自动吸收脚下炮台 + 面板一键'追加附近炮台'"，已按新口径删掉自动吸收，
+面板那颗按钮换成同一入口的「选取炮台」。）交互在 `src/combineunit/units/MegaTurretPicker.java`：
+按钮是挂在 `Core.scene.root` 上的真实 arc 元素（触摸端/桌面都能点，挂 root 而不是 hudGroup
+的原因见 combine 仓库 `SuperTurretPlacer`），每帧按 `Core.camera.project` 跟着世界坐标走；
+点回调只置 `pending`、下一帧再动场景（arc 的 input 派发栈里摘元素会 NPE）。
+吸收本身服务端权威：`UnitComboMerge.requestAbsorbTurret` → `MegaOrderPacket.turretAt`
+→ `absorbTurretAt`（服务端按格重新校验同队/是炮台/在吸收半径内）。
+
+**"点了「添加」却没反应"的几道兜底（用户 2026-10-08 报）**：
+
+1. **炮台本体也能点**：`MegaTurretPicker` 注册了一个 `InputProcessor`（排在 `Core.scene` **之后**，
+   所以场景已经吃掉的点击——点在我们的按钮/别的面板上——不会进来）：选取模式下点到世界里、
+   落点在某座待选炮台格子里时，就当点了它那颗「添加」并**吃掉这次点击**（顺带不会变成对巨兽下移动令）。
+2. **点下去那一帧的引用可能已经过期**（客户端读快照/世界重建会换掉建筑对象）：`absorbSafely()`
+   按"格"重新取一次当前那座，取不到就跳过。
+3. **半径留 8px 余量**：客户端列出来/可点的用 `absorbRadius - 8`，服务端仍按原半径判定 ——
+  联机时两边坐标插值差一点点也不会出现"客户端显示、服务端判超距"的静默失败。
+4. **失败不再静默**：吸收失败会 `showInfoFade("这座炮台吃不进去：炮台舱已满（最多 N 座 = 成员武器数之和）或不在吸收范围内")`
+   （用户 2026-10-08 的实况就是"舱位满了"却看不出来，一直点；诊断用的 `[combine] 选取炮台：…`
+   日志按用户要求已删掉，只留这条触摸端/桌面都能看到的提示）。
+5. **联机包单独钉**：`MegaTurretTest` 里对 `MegaOrderPacket.turretAt`（新增的
+   `absorbTurretAt/turretX/turretY` 三个字段）做写读往返（实测 22 字节、格子与 unitId 都对得上）——
+   单机走 `absorbTurretAt` 本地调用，**联机才走这个包**，不钉的话包格式写错只会表现为"点了没反应"。
+
+**舱位上限 = 巨兽身上所有成员单位的武器数量之和（用户 2026-10-08 口径）**：
+`MegaTurretBay.maxTurrets()` 直接取巨兽自己的武器挂载数（原版 `UnitType.init()` 已把 mirror 武器
+展开成两条，所以 `type.weapons.size` 就是"这个单位的武器数量"，而巨兽的 mounts 正是全部成员武器
+依次复制出来的）——**两端算出来的是同一个数**，联机不会出现"客户端能点、服务端说满了"。
+另有 `HARD_MAX_TURRETS = 64` 这道硬闸（防"成员极多"的单只巨兽拖垮帧率，每座炮台每帧都要
+update + 绘制），内部世界边长上限跟着提到 `MAX_GRID = 64`（格子只按实际炮台数增长，不是一上来就 64²）。
+实测：2 只 dagger → 4 座、4 只 dagger → 8 座、2 只 vanquish → 10 座、4 只 vanquish → 20 座。
+**到了上限**：`collectTargets()` 一律不列 → 不再画「添加」按钮（点了也吃不进去），
+进选取模式时会直接提示"炮台舱已满（最多 N 座）"。
+
+**按钮定位的坐标系（踩过的坑，用户报"按钮没有一直显示在炮台上面，有偏移"）**：
+arc 的 `Camera.project` 返回的是**左下原点、y 向上**的屏幕坐标（arc 的
+`Viewport.toScreenCoordinates` 就是"project 之后再 `height - y`"来得到左上原点/y 向下的坐标），
+而 arc 的 Scene 用的也是同一套 —— `Scene.act()` 里 `root.y = marginBottom`、
+`Element.setPosition` 的 javadoc 明说设的是"bottom left corner"。所以第一版里那句
+`sy = height - project.y` 再 `y = sy - lift - height` 是**错上加错**（多翻了一次 y、lift 方向还反了）：
+按钮会上下镜像 + 整体往下偏，越远离镜头中心偏得越多。现在 `placeAbove()` 直接
+`y = root原点.y + project.y + lift`（`root` 原点 = `(marginLeft, marginBottom)`，刘海屏留白要加回来），
+`lift` 按"世界单位 × 相机缩放"换算 —— 镜头放大时炮台贴图也放大，按固定像素抬会压在身上。
+真客户端实测（`turret` 模式，900×700、缩放 3 倍）：炮台投影处 `(396,380)`（图像坐标）→ 按钮
+底边 `y=359`、中心 `x=396`，正好压在那座 2×2 炮台上缘之上；三座炮台各一个，都不再偏移
+（截图 `016_turret_pick.png`，驱动会逐颗打按钮实际坐标）。
+
+**炮台位置（用户要求"和武器一样"）**：`MegaTurretBay.relayout()` 每次吸收后把全部炮台重摆一遍 ——
+**偶数座 → 左右两边各一半（右侧先定锚点，左侧按巨兽中线镜像，严格对称）；奇数座 → 多出来的那一座
+（最后吸收的那座）摆正中间**。坐标用的是和武器挂载同一套口径：内部世界的 **x 是横向、y 是前后**
+（`project()` 和 Weapon 一样走 `Angles.trns(rotation - 90, x, y)`）。摆位换算按原版
+`Block.offset = ((size+1)%2)*tilesize/2` 的口径反解锚点格（偶数尺寸的方块中心落在两格之间），
+放不下时先就近外扩、再兜底随便找空地。
+
+**两侧摆位 = 圆环（用户 2026-10-09："两边的被组合炮台的位置和武器一样是环形的"）**：
+`relayout()` 不再把两侧码成左右两根竖列，而是和 `layoutWeapons` 同一套 —— 每半边 150°、
+右侧第 k 座落在 `(cos a, sin a) * radius` 上、左侧按巨兽中线镜像（横向取反、前后相同 → 严格对称）；
+半径取三者较大者：①武器圆的世界半径（`hitSize*0.55` 换算成格）；②至少 `maxSize+1` 格；
+③"每座占 maxSize 格"所需的弧长（150° 弧 ≈ 2.6×半径）。奇数座多出来的那一座仍然摆正中间。
+实测（headless）：4 座同尺寸 duo 到中心距离全是 17.8885px（极差 0，正圆环）、左右严格镜像；
+3 座混编（duo+scatter+wave）半径 20.4/24.0px（差一格以内的对齐误差）、正中间 1 座。
+
+**炮台弹药（用户 2026-10-09："发射的弹药为其弹药列表循环发射，核心没有对应物品就不发射，
+在解体界面可以选择哪些弹药不被使用"）**：
+`MegaTurretBay.feedFromCore()` 改成**按这座炮台自己的弹药表循环喂** —— 每次只喂 1 个料，
+从上次停下的位置往后找第一个"没被勾掉、且队伍核心里有货"的弹药（原版 `ammo` 是栈、
+`peekAmmo()` 就是下一发，所以不同弹药轮流出现、打出来的子弹在弹药表里轮换）；
+核心没有对应物品（或全被勾掉）就一个都不补，那一座自然打不出子弹。仍然只补到半仓、每 tick 至多 1 个料。
+面板（`UnitComboBind` 的组合巨兽分支）多了一段「炮台弹药」：列出舱里所有物品炮台弹药表的并集，
+一颗按钮一种（`X（使用中）` / `X（不用）`，点了下一帧重画），改动走
+`UnitComboMerge.requestAmmoTune`（单机直接改，联机走 `MegaOrderPacket.ammo`，服务端权威）。
+这张"禁用表"跟着**快照和存档**走：炮台体格式加了 `VER_TUNE_COMPACT=3 / VER_TUNE_FULL=4`
+（只有真的有禁用项时才升版本，空表写老版本 → 旧 jar 读新档不会因为多出来的一段读歪）；
+读档/收快照时直接覆盖本地（服务端权威，不会出现"客户端勾了、服务端还在用"）。
+实测（headless）：duo 的弹药表 = copper/graphite/silicon，核心三种都有时弹仓里三种都出现（循环）；
+核心只剩 copper 时只补 copper；三种都清零后弹仓恒为 0（打不出去）；面板勾掉 copper 后只剩 graphite/silicon。
+
+**"放在原地打路过的敌人：一直索敌抽搐就是不攻击"（用户 2026-10-09）**：根因是**机身从来不转**。
+原版 `AIController.faceTarget()` 的条件是 `(unit.type.omniMovement || unit instanceof Mechc) &&
+unit.type.faceTarget && unit.type.hasWeapons()` —— 巨兽两条都不满足：派生类型的 `weapons` 是空的
+（武器挂载在实体自己的 `mounts` 上，由成员武器复制），实体也不是 `Mechc`（故意的，见类注释里
+"机甲飞行时禁止开火"那段）。于是 `rotate = false` 的**固定武器**（原版只有 avert 一把，模组里很常见；
+`Weapon.update` 里固定武器就是 `mount.rotation = baseRotation`，只能指着机身朝向）永远指不上目标，
+看上去就是"一直在索敌、武器在转/不转之间抽动、一炮打不出去"。修法：`MegaUnitEntity.faceTargetLikeMech()`
+照原版补一遍 —— 有固定武器（或编组本来就是机甲/腿/履带这类原版会转身打的）且控制器是 AI 时，
+把机身朝最近敌人转过去（预判同样用 `Predict.intercept`，转速用类型 `rotateSpeed`）。
+判定：3×avert 的巨兽放原地、敌方从侧上方贴边路过 —— 修前机身 `rotation 0~0（累计转过 0°）`、
+自己的武器 0 发；修后机身 `0~350（转过 186°）`、固定武器打出子弹（`[avert-weapon] shots=2`）、
+舱里 duo 照常 8 发（`MegaIdleFireTest`）。
+
+**炮台绘制（用户 2026-10-09："炮台的 drawer 和 part 没画，参考一下合体炮台"）**：
+`MegaUnitEntity.drawTurrets()` 对**原版 `DrawTurret`**（含模组里用的原版 drawer，实测饱和火力
+全部 100 个炮台都是它）改成**逐项复刻原版 `DrawTurret.draw`、但所有层都落在巨兽机身的 z 上** ——
+底板 → 本体 region → 液体 → top → 热量 → 描边 → `parts` → `ammoParts`，其中 parts **逐件 try 隔离**
+（原版是同一段连续代码，任何一件抛异常会把描边和所有部件一起丢）。做法照搬 combine 仓库
+`SuperTurret.drawCellDrawer`（那边已经被用户抓过几轮、修到通）。`DrawTurret` 的**子类**（模组自定义
+drawer）走"抬它自己的 `turretLayer/shadowLayer/heatLayer` + 照常 `b.draw()`"，保留它的自定义逻辑；
+不是 `DrawTurret` 的 drawer（`DrawMulti` 等）在当前 z 上直接交给它自己画。
+
+**"有的炮台不发射"（用户 2026-10-09）**：新写了一个扫描工具
+`combineunit.dbg.MegaTurretFireTest`（默认诊断模式、`-Dassert=1` 才断言）——
+把**每一种**炮台方块逐个吸进巨兽体内，场上铺 40~600px 四向的地面+空中厚血靶子，
+跑 3000 tick 看 `totalShots`/自己名下的子弹数。修前 61/98 开火、98 个炮台里 37 个一发不打；
+按现场逐条修完（装饱和火力数据集实测 **43/44 开火**，唯一的例外见下）：
+1. **一次补够"一发"的弹药**（原来每 tick 只喂 1 个料，`ammoPerShot>1` 的炮台永远凑不齐，
+   实测 scathe 每发 15 / titan 每发 4 / 阻碍 每发 30）；
+2. **补到满仓**（原来只补半仓，`ammoPerShot > maxAmmo/2` 的照样凑不齐一发）；
+3. **冷却液 / 消耗型液体一次灌满**：原版 `consumeCoolant()` 生成的是 `ConsumeLiquidFilter`
+   （不是 `ConsumeLiquid`），只认后者的话 meltdown/lustre/titan 这些永远拿不到液体、效率 0；
+   而且原版是"按效率消耗"的反馈 —— 只补 5/帧会在低效率上稳定下来（sf 屠龙宝刀效率 0.083），
+   所以直接灌满；
+4. **要热量的炮台塞一个隐形假热块**：原版 `calculateHeat()` 遍历 `proximity` 里的 HeatBlock 求和，
+   而接触点算法 `size/2+热源size/2-距离/8` 在格子里"贴着放"也常常算出 0（实测 afflict 4x4 +
+   1x1 热源贴着放 = 0），所以干脆用一个**不注册、不占格子、坐标跟炮台完全重合**的假热块
+   （`MegaTurretBay.FakeHeat`）塞进 proximity —— 不依赖版本/格子几何。afflict/malign/
+   热轨道防御平台/碎影 四个修前全不打，修后全开火。
+5. 剩下 1 个不开火的是饱和火力-前狼（`target=null`：扫描工具的靶子不在它的索敌范围/过滤条件里，
+   不是"不发射"）。
+
+**炮台绘制（用户报"只画了 base"）**：原版 `DrawTurret` 把炮台分三层 —— 基座画在**调用时的 z**、
+炮台主体/parts 落在 `Layer.turret`(50)、热量 `Layer.turretHeat`(50.1)；而巨兽机身画在
+`Layer.groundUnit`(60) 一带。原来直接 `b.draw()`，基座（≈61）看得见、主体和 parts 全被机身盖住。
+现在 `MegaUnitEntity.drawTurrets(z)` 在画每座炮台前**临时**把这颗 drawer 的
+`turretLayer/shadowLayer/heatLayer`（以及 parts 的 `RegionPart.turretHeatLayer`）抬到机身之上，画完立刻还原 ——
+走的还是方块自己的 drawer（主体 region + liquid/top + `parts`/`ammoParts` + 热量），
+模组炮台自定义的 drawer/parts 也一起照顾到。
+
+**玩家操控（用户问"为什么不能控制炮台转向和开火"）**：玩家正在操控巨兽时
+（`mega.controller() instanceof Player`），`MegaTurretBay.driveByPlayer()` 每 tick 走原版
+**逻辑控制炮台**那条路驱动舱内炮台 —— `tb.control(LAccess.shoot, World.conv(mega.aimX()), World.conv(mega.aimY()), 玩家按住开火?1:0, 0)`，
+和逻辑处理器写 `control shoot` 一模一样：目标点进 `targetPos`、`logicControlTime` 续到 2 秒、
+`logicShooting` 记住开不开火，炮台自己在 `updateTile()` 里转向/开火。玩家松手就不再续，
+2 秒后 `logicControlTime` 衰减到 0，炮台回到自己的 AI 索敌。
+**故意不碰 `unit`/controller**：直接给炮台的 BlockUnit 挂玩家控制器会触发
+`PlayerComp.unit()` 把 `player.unit` 从巨兽换成那个假单位（那是原版"附身炮台"，一次只能附身一台），
+巨兽反而丢掉操控者 —— 实测表现为炮台照样只打 AI 目标。
 
 实现见 `src/combineunit/units/mega/MegaTurretBay.java`：吸收时先 `tile.setBlock(air)` 走原版流程
 （`onRemoved`、从 `Groups.build`/队伍索敌树里摘干净），再**绕过 `setBlock`**（`Tile.updateBlockReference`
@@ -155,8 +307,9 @@ verify/run-client.sh mx /tmp/mp_unit/data turret     # 组合炮台：合体吸�
 改法：把炮台段**写进成员体内部**（成员体本身有长度前缀、按长度整块读进内存）。
 这样老存档读到炮台段之前就 EOF → 被吞掉保持空舱；新存档两端对称；
 旧版客户端读新版快照也只是把多出来的炮台字节当成成员体的一部分丢掉。
-回归：`MegaTurretTest` 第 8 节直接读 `/tmp/mp_unit/data/saves/17.msav`（发布版写的、没有炮台段），
-实测能读进去、读回 4 只巨兽；同测试还压了存档字节往返（452B）与空舱快照（150B）。
+回归：`MegaTurretTest` 第 10 节直接读 `/tmp/mp_unit/data/saves/17.msav`（发布版写的、没有炮台段），
+实测能读进去、读回 4 只巨兽；同测试还压了存档字节往返（500B）与空舱快照（150B）。
+炮台位置（快照/存档里的 `tx/ty` 是**服务端布局算好的**，客户端照字节重建，不再自己找格）。
 
 ## 3. 换 jar / 换版本
 

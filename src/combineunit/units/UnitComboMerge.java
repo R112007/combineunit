@@ -21,6 +21,7 @@ import mindustry.gen.Groups;
 import mindustry.gen.Unit;
 import mindustry.gen.WaterMovec;
 import mindustry.type.UnitType;
+import mindustry.type.Item;
 import mindustry.world.Tile;
 import mindustry.world.blocks.payloads.UnitPayload;
 
@@ -384,16 +385,9 @@ public class UnitComboMerge{
         }
         mega.add();
 
-        // 【组合炮台】用户要求：合体的时候把脚下的炮台一起组合进来，摆在巨兽内部的小 World 里
-        // （炮台跟着巨兽走并照常开火，物品弹药从核心扣，解体时放回）。吸收是服务端权威操作。
-        int turrets = absorbNearbyTurrets(mega);
-        if(turrets > 0 && !Vars.headless && Vars.ui != null){
-            try{
-                Vars.ui.showInfoFade("[accent]已吸收 " + turrets + " 座炮台进入巨兽体内[]");
-            }catch(Throwable ignored){
-            }
-        }
-
+        // 【组合炮台】合体时**不再自动**吸收脚下的炮台：用户要求改成手动挑选 ——
+        // 点巨兽 → "选取炮台" → 附近每座炮台各画一个"添加"按钮 → 点哪座吸哪座
+        //（见 MegaTurretPicker；单座吸收走 MegaOrderPacket 的 absorbTurretAt，服务端权威结算）。
         Fx.unitDrop.at(mega.x, mega.y);
         Sounds.unitCreateBig.at(mega.x, mega.y, 0.9f, 0.8f);
         return mega;
@@ -570,6 +564,55 @@ public class UnitComboMerge{
     /** 吸收半径：巨兽体型 + 一圈，太远了不算"脚下的炮台"。 */
     static float absorbRadius(MegaUnitEntity mega){
         return Mathf.clamp(mega.hitSize() + 24f, 48f, 120f);
+    }
+
+    /**
+     * 吸收**指定的某一座**炮台（"选取炮台 → 添加"那条路）：只吃这一座，别的不动。
+     * 服务端重新校验（格子上的建筑、同队、是炮台、在吸收半径内），客户端指哪都不算数。
+     * @return 是否吸收成功
+     */
+    public static boolean absorbTurretAt(MegaUnitEntity mega, int tileX, int tileY){
+        if(mega == null || !mega.isAdded() || Vars.net.client()) return false;
+        Tile tile = Vars.world.tile(tileX, tileY);
+        Building b = tile == null ? null : tile.build;
+        if(!MegaTurretBay.absorbable(b, mega.team())) return false;
+        if(mega.dst(b) > absorbRadius(mega)) return false;      // 只能吸"附近"的
+        return mega.bay().absorb(b);
+    }
+
+    /** 客户端请求吸收某座炮台（联机走 {@link MegaOrderPacket}，服务器权威结算）。 */
+    public static void requestAbsorbTurret(MegaUnitEntity mega, Building b){
+        if(mega == null || b == null || b.tile == null) return;
+        if(Vars.net.client()){
+            Vars.net.send(MegaOrderPacket.turretAt(mega, b.tile.x, b.tile.y), true);
+        }else{
+            int tx = b.tile.x, ty = b.tile.y;
+            boolean ok = absorbTurretAt(mega, tx, ty);
+            if(!ok && Vars.ui != null){
+                // 失败别静默：玩家分不清是"没点到"还是"吃不下"（用户 2026-10-08 就是舱位满了
+                // 却不知道，一直点）。舱位满/超距/不是炮台都会走到这句。
+                try{
+                    Vars.ui.showInfoFade("[orange]这座炮台吃不进去：炮台舱已满（这只巨兽最多 "
+                        + mega.bay().maxTurrets() + " 座 = 成员武器数之和）或不在吸收范围内[]");
+                }catch(Throwable ignored){
+                }
+            }
+        }
+    }
+
+    /**
+     * 改"炮台弹药禁用表"：面板里勾掉某种弹药（banned=true = 不用它）。
+     * 联机时客户端只发请求（服务端改完随快照下来，客户端那份会被覆盖成同一份）；
+     * 单机直接本地改。
+     */
+    public static void requestAmmoTune(MegaUnitEntity mega, Item item, boolean banned){
+        if(mega == null || item == null) return;
+        if(Vars.net.client()){
+            Vars.net.send(MegaOrderPacket.ammo(mega, (short)item.id, banned), true);
+        }else{
+            if(banned) mega.bay().bannedAmmo().add(item);
+            else mega.bay().bannedAmmo().remove(item);
+        }
     }
 
     /** 把巨兽体内的炮台全部放回世界（不解散巨兽本身）。只在服务端/单机调。 */

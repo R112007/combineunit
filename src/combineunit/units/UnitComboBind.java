@@ -18,7 +18,9 @@ import mindustry.gen.Call;
 import mindustry.gen.Groups;
 import mindustry.gen.Icon;
 import mindustry.gen.Unit;
+import mindustry.type.Item;
 import mindustry.ui.dialogs.BaseDialog;
+import arc.scene.ui.TextButton;
 
 /**
  * 组合单位的手动编组入口与可视化。
@@ -208,18 +210,49 @@ public class UnitComboBind{
             int tn = mega.hasTurrets() ? mega.bay().size() : 0;
             String turretLine = tn > 0
                 ? "    炮台 " + tn + " 座（" + mega.bay().composition() + "）"
-                : "    炮台 0 座（合体时自动吸收脚下的炮台）";
+                : "    炮台 0 座（点\"选取炮台\"挑附近的炮台加进来）";
             dialog.cont.add("组合巨兽    " + n + " 名成员（" + UnitComboMerge.composition(u) + "）"
                 + turretLine + "    血量 " + (int)(u.healthf() * 100) + "%").padBottom(8f).row();
-            // 触屏/鼠标都能点：追加与释放都走按钮，不依赖任何快捷键
-            dialog.cont.button("追加附近炮台", () -> {
-                UnitComboMerge.requestAbsorbTurrets(u);
-                rebuildDialog();
+            // 【选取炮台】用户要求：不再一键"追加附近炮台"，改成点巨兽 → "选取炮台" →
+            // 附近每座炮台各画一个"添加"按钮 → 点哪座吸哪座（见 MegaTurretPicker）。
+            // 面板里这颗按钮是同一个入口（触屏/鼠标都能点，不依赖任何快捷键）。
+            dialog.cont.button("选取炮台", () -> {
+                MegaTurretPicker.show(u);
+                dialog.hide();
+                picked = null;
             }).size(260f, 48f).padTop(8f).row();
             dialog.cont.button("释放全部炮台", () -> {
                 UnitComboMerge.requestReleaseTurrets(u);
                 rebuildDialog();
             }).disabled(b -> tn == 0).size(260f, 48f).padTop(4f).row();
+
+            // ---- 【炮台弹药】用户 2026-10-08：面板里可以选择哪些弹药不被使用 ----
+            // 舱里的物品炮台按"自己的弹药表"循环开火（每次从核心里补 1 个料），这里勾掉的
+            // 弹药直接从循环里去掉；核心没有对应物品同样不会打（见 MegaTurretBay.feedFromCore）。
+            Seq<Item> ammos = tn > 0 ? mega.bay().ammoList() : new Seq<>();
+            if(ammos.size > 0){
+                dialog.cont.add("[accent]炮台弹药[]（点一下切换 用 / 不用；点一下即生效）")
+                    .left().padTop(10f).row();
+                arc.scene.ui.layout.Table grid = new arc.scene.ui.layout.Table();
+                int col = 0;
+                for(Item item : ammos){
+                    boolean banned = mega.bay().bannedAmmo().contains(item);
+                    String label = banned
+                            ? "[gray]" + item.localizedName + "（不用）[]"
+                            : "[white]" + item.localizedName + "（使用中）[]";
+                    TextButton tb = grid.button(label,
+                            () -> {
+                                UnitComboMerge.requestAmmoTune(mega, item, !banned);
+                                // 点了会改内容的按钮：下一帧再重画（见 tick 里那条 UI 约定）
+                                rebuildDialog();
+                            }).size(230f, 46f).pad(2f).get();
+                    // 名字长（Metaglass/Silicon…）+ 状态字，别让它折行（折了 46px 高塞不下）
+                    tb.getLabel().setWrap(false);
+                    tb.getLabel().setFontScale(0.8f);
+                    if(++col % 2 == 0) grid.row();
+                }
+                dialog.cont.add(grid).padTop(2f).row();
+            }
             dialog.cont.button("解体为成员单位", () -> {
                 UnitComboMerge.requestSplit(u);
                 dialog.hide();

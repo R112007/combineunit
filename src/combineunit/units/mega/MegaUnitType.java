@@ -176,6 +176,11 @@ public class MegaUnitType extends UnitType {
     public MegaUnitType(String name) {
         super(name);
         constructor = MegaUnitEntity::new;
+        // 【波次 AI】巨兽的移动全交给派生类型的流场寻路，而原版 GroundAI 在"自己脚下这格
+        // 在自己的代价表里不可达"（能悬空的巨兽经常悬在天然岩壁/深水上）时会永远原地不动 ——
+        // 见 MegaGroundAI 的类注释。这里把巨兽的默认 AI 换成加了兜底的版本
+        // （只影响 AI 队伍的巨兽：玩家队伍走 CommandAI，原版 UnitType.controller 的分支不变）。
+        aiController = MegaGroundAI::new;
         // 【环境适应：占位类型必须最宽松】
         // 原版 UnitType 的默认口径是 envEnabled = Env.terrestrial、envDisabled = Env.scorching
         //（塞普罗口径），而埃里克尔地图的 state.rules.env 就是
@@ -582,8 +587,7 @@ public class MegaUnitType extends UnitType {
 
         // 【组合炮台】巨兽体内吸收的炮台画在机身/武器之上：摆在巨兽身上，跟着巨兽转
         if(mu != null){
-            Draw.z(z + 1f);
-            mu.drawTurrets();
+            mu.drawTurrets(z + 1f);
             Draw.z(z);
         }
 

@@ -217,6 +217,19 @@ public class MegaPossessLoadTest implements ApplicationListener{
                 + " getByID(" + owner.id + ")=" + Groups.player.getByID(owner.id));
             log("读档后: owner.unit()=" + (owner.unit() == null ? "null" : owner.unit().getClass().getSimpleName())
                 + " 巨兽控制器=" + ctrlName(loaded) + " 巨兽还活着=" + !loaded.dead());
+            // ---- ③ 真实客户端里读档后面还有几步会把"玩家 ↔ 巨兽"这对关系掀掉 ----
+            // （原版读档流程：Groups.clear → 读地图时 WorldLoadEvent 里 player.add() → 读实体 →
+            //   读档后玩家没单位时核心机还会补一台出来；PlayerComp.remove 的 clearUnit() 会
+            //   unit.resetController() 把巨兽换成 AI —— 一旦我们的补挂时机早于这些步骤，
+            //   玩家就"不能控制巨兽攻击、得重新附身"。所以窗口期内要反复复核。）
+            owner.unit(null);          // = 模拟"读档流程后半段又把玩家的单位清掉"
+            run(3);
+            log("掀掉后: owner.unit()=" + (owner.unit() == null ? "null" : "有单位")
+                + " 巨兽控制器=" + ctrlName(loaded));
+            run(30);                   // 等一次重试（20 tick）
+            check("玩家单位被读档流程掀掉后能自动补回（控制器=" + ctrlName(loaded) + "）",
+                loaded.controller() == (UnitController)owner && owner.unit() == loaded);
+
             long s1 = shots(loaded);
             for(int i = 0; i < 300; i++){ fireTick(loaded); run(1); }
             long after = shots(loaded) - s1;
@@ -228,7 +241,7 @@ public class MegaPossessLoadTest implements ApplicationListener{
                 shootCount(loaded) == loaded.mounts().length);
             check("读档后不重新附身也能打出子弹（" + after + " 发）", after > 0);
 
-            // ---- ③ 用户的兜底办法：重新附身 ----
+            // ---- ④ 用户的兜底办法：重新附身 ----
             owner.unit(loaded);
             run(2);
             long s2 = shots(loaded);

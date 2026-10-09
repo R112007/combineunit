@@ -4,6 +4,7 @@ import combineunit.units.UnitComboBind;
 import combineunit.units.UnitComboDamage;
 import combineunit.units.UnitComboFire;
 import combineunit.units.UnitComboMerge;
+import combineunit.units.MegaTurretPicker;
 import arc.util.Log;
 import mindustry.Vars;
 import mindustry.mod.Mod;
@@ -33,8 +34,11 @@ public class Main extends Mod {
 
     // 手动编组 UI：指挥模式下选中己方单位后，命令按钮区出现"组合"按钮
     // （无头服务端没有 UI，跳过）。
-    if (!Vars.headless)
+    if (!Vars.headless){
       UnitComboBind.register();
+      // 【选取炮台】点组合巨兽 → "选取炮台" → 附近每座炮台上出现"添加"按钮 → 点哪座吸哪座
+      MegaTurretPicker.register();
+    }
 
     // 防闪退兜底：玩家名字为 null 时，原版小地图画玩家名字会直接 NPE 闪退
     //（crash_1790334593570.txt）。这段是游戏自己的代码改不了，我们保证数据侧不为空。

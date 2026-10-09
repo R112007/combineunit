@@ -246,7 +246,7 @@ public class Driver extends Mod{
                 // 再给一只敌人当靶子（看炮台真的开火）；最后把巨兽转个角度再拍一张，看炮台跟着转。
                 installFrameCounter();
                 installCameraLock();
-                keepDialogsHidden();
+                keepDialogsHidden(38);   // 只清到 ~40s：最后要拍组合面板（弹药开关那一段）
                 Timer.schedule(Driver::setupMidScene, 5f);
                 Timer.schedule(Driver::turretMerge, 10f);
                 Timer.schedule(Driver::turretPlace, 13f);
@@ -257,11 +257,40 @@ public class Driver extends Mod{
                 Timer.schedule(() -> turretRot = 0f, 25f);
                 Timer.schedule(Driver::turretReport, 28f);
                 Timer.schedule(() -> shot("turret_rot0"), 30f);
+                // ---- 第二阶段：手动"选取炮台"（用户要求的新交互）----
+                Timer.schedule(Driver::turretPickPlace, 32f);
+                Timer.schedule(Driver::turretPickReport, 34f);
+                Timer.schedule(() -> shot("turret_pick"), 34.6f);
+                // 【真点击】用 scene 的真实输入路径点第一颗「添加」（不是直接调 requestAbsorbTurret）
+                Timer.schedule(Driver::turretPickClick, 36f);
+                Timer.schedule(Driver::turretPickReport, 38f);
+                Timer.schedule(() -> shot("turret_pick_added"), 38.6f);
+                Timer.schedule(Driver::turretPickTapWorld, 39.4f);
+                Timer.schedule(Driver::turretAmmoToggle, 40f);
+                Timer.schedule(Driver::turretAmmoReport, 40.6f);
                 // keepDialogsHidden 每秒清一次弹窗，会把组合面板一起清掉 —— 面板要在
-                // "刚清完" 的缝隙里弹出（36.4）并立刻截图（36.8），别等到下一个整秒。
-                Timer.schedule(Driver::turretOpenPanel, 36.4f);
-                Timer.schedule(() -> shot("turret_panel"), 36.8f);
-                Timer.schedule(() -> { Log.info("[drv] turret 模式结束 frames=@", frames); Core.app.exit(); }, 41f);
+                // "刚清完" 的缝隙里弹出（41.4）并立刻截图（41.8），别等到下一个整秒。
+                Timer.schedule(Driver::turretOpenPanel, 41.4f);
+                Timer.schedule(() -> shot("turret_panel"), 41.8f);
+                Timer.schedule(() -> { Log.info("[drv] turret 模式结束 frames=@", frames); Core.app.exit(); }, 46f);
+            }else if(mode.equals("possess")){
+                // 用户报："附身在组合巨兽身上[存档读档]后就不能控制巨兽攻击了，得重新附身"。
+                // 这里在真客户端里走一遍：融合 → 附身 → 按住开火（照抄 DesktopInput 的尾巴）→ 存盘 →
+                // 读档（和暂停菜单的"载入"同一条路：SaveIO.load + 回到 playing）→ 再看还能不能开火。
+                installFrameCounter();
+                installCameraLock();
+                keepDialogsHidden();
+                Timer.schedule(Driver::setupMidScene, 5f);
+                Timer.schedule(Driver::possessMerge, 10f);
+                Timer.schedule(() -> possessFireBurst("存盘前"), 12f);
+                Timer.schedule(() -> possessReport("存盘前"), 16f);
+                Timer.schedule(Driver::possessSave, 18f);
+                Timer.schedule(Driver::possessLoad, 21f);
+                Timer.schedule(Driver::possessAbsorbTurret, 24f);
+                Timer.schedule(Driver::possessTurretCheck, 26f);
+                Timer.schedule(() -> possessReport("读档后"), 30f);
+                Timer.schedule(() -> shot("possess_after_load"), 31f);
+                Timer.schedule(() -> { Log.info("[drv] possess 模式结束 frames=@", frames); Core.app.exit(); }, 36f);
             }else{
                 Log.err("[drv] 未知模式 @（combineunit 支持 mega|legs|mech|duo|shipmega|hover|icon|mid|tank|sf|flight|engines|turret）", mode);
                 Core.app.exit();
@@ -1009,6 +1038,11 @@ public class Driver extends Mod{
         Timer.schedule(Driver::hideDialogs, 2f, 1f, 60);
     }
 
+    /** 同上，但只清 count 次（turret 模式的组合面板截图不能被后面的清理吃掉）。 */
+    static void keepDialogsHidden(int count){
+        Timer.schedule(Driver::hideDialogs, 2f, 1f, count);
+    }
+
     static Unit megaUnit(){
         for(Unit u : Groups.unit)
             if(u.getClass().getName().equals("combineunit.units.mega.MegaUnitEntity")) return u;
@@ -1094,6 +1128,22 @@ public class Driver extends Mod{
             Object mega = combineCall("combineunit.units.UnitComboMerge", "mergeSelected", new Class<?>[]{Seq.class}, us);
             if(mega instanceof Unit mu){ mu.set(x, y); out.accept(mu); }
         }catch(Throwable t){ Log.err("[drv] mergeAt failed", t); }
+    }
+
+    /** 融合 N 只同类单位（turret 模式要一个"武器数够多、舱位上限够大"的巨兽）。 */
+    static void mergeAtN(float x, float y, java.util.function.Consumer<Unit> out, UnitType... types){
+        try{
+            Seq<Unit> us = new Seq<>();
+            for(int i = 0; i < types.length; i++){
+                Unit u = types[i].create(Team.sharded);
+                u.set(x - 14f * (types.length - 1) + 28f * i, y);
+                u.add();
+                us.add(u);
+            }
+            run(2);
+            Object mega = combineCall("combineunit.units.UnitComboMerge", "mergeSelected", new Class<?>[]{Seq.class}, us);
+            if(mega instanceof Unit mu){ mu.set(x, y); out.accept(mu); }
+        }catch(Throwable t){ Log.err("[drv] mergeAtN failed", t); }
     }
 
     static void hoverCenter(){
@@ -1560,20 +1610,27 @@ public class Driver extends Mod{
     static void turretMerge(){
         try{
             float cx = midOx * 8f, cy = midOy * 8f;
-            mergeAt(cx, cy, UnitTypes.vanquish, UnitTypes.vanquish, mu -> {
+            // 【4 只 vanquish】舱位上限 = 成员武器数之和（2 只时太小，下面要点 3 颗「添加」+ 1 次
+            // "直接点炮台本体"，得留出余量）
+            mergeAtN(cx, cy, mu -> {
                 turretBeast = mu;
                 camTarget = mu;
                 // 钉住位置 + 朝向：截图里炮台的位置 = 按朝向投影的结果，和日志逐座对照
                 var t = new arc.scene.ui.layout.Table();
                 t.touchable = arc.scene.event.Touchable.disabled;
+                // 【钉住位置+朝向】巨兽的 AI（MegaGroundAI）会朝敌方核心推进 —— 不钉住的话
+                // 它会开出镜头，炮台/按钮就拍到画面外了（截图里"没有按钮"就是这么来的）。
+                float pinX = mu.x, pinY = mu.y;
                 t.update(() -> {
                     if(turretBeast == null || !turretBeast.isAdded()) return;
+                    turretBeast.set(pinX, pinY);
                     turretBeast.rotation(turretRot);
                     turretBeast.vel().setZero();
                 });
                 Vars.ui.hudGroup.addChild(t);
-                Log.info("[drv] turret: 融合=@ 炮台舱=@ 座 hitSize=@", mu.type.name, turretBaySize(mu), mu.hitSize());
-            });
+                Log.info("[drv] turret: 融合=@ 炮台舱=@ 座 hitSize=@ 舱位上限=@（成员武器数之和）",
+                    mu.type.name, turretBaySize(mu), mu.hitSize(), turretBayMax(mu));
+            }, UnitTypes.vanquish, UnitTypes.vanquish, UnitTypes.vanquish, UnitTypes.vanquish);
             if(turretBeast == null){
                 StringBuilder sb = new StringBuilder();
                 for(Unit u : Groups.unit) sb.append("\n      ").append(u.type.name).append(" team=").append(u.team())
@@ -1680,6 +1737,182 @@ public class Driver extends Mod{
         }catch(Throwable t){ Log.err("[drv] turretReport failed", t); }
     }
 
+    // ---------------- turret 第二阶段：手动"选取炮台"（用户要求的新交互） ----------------
+    static Building turretPickA, turretPickB, turretPickC;
+
+    /** 在巨兽旁边再摆 3 座炮台（留在世界里），然后进入"选取炮台"模式。 */
+    static void turretPickPlace(){
+        try{
+            if(turretBeast == null) return;
+            turretRot = 0f;
+            int bx = (int)(turretBeast.x / 8f), by = (int)(turretBeast.y / 8f);
+            turretPickA = placeBL(Blocks.duo, bx + 4, by - 4);
+            turretPickB = placeBL(Blocks.scatter, bx + 4, by + 2);
+            turretPickC = placeBL(Blocks.wave, bx - 4, by + 3);
+            run(3);
+            // 和"点巨兽 → 选取炮台"同一个入口（面板按钮 / 巨兽头上的浮标都走它）
+            combineCall("combineunit.units.MegaTurretPicker", "show", new Class<?>[]{Unit.class}, turretBeast);
+            Log.info("[drv] turret: 选取炮台模式已开（清场后炮台舱=@ 座；世界里 duo=@ scatter=@ wave=@）",
+                turretBaySize(turretBeast), turretPickA != null, turretPickB != null, turretPickC != null);
+            // 【现场诊断】选取模式被 tick() 复位只有两种可能：不在游戏里（reset）或 pickable() 为假
+            Log.info("[drv] turret 现场: 巨兽 valid=@ added=@ dead=@ team=@ | player=@ team=@ | state=@ isGame=@ hasDialog=@",
+                turretBeast.isValid(), turretBeast.isAdded(), turretBeast.dead(), turretBeast.team(),
+                Vars.player == null ? "null" : "有", Vars.player == null ? "-" : Vars.player.team(),
+                Vars.state.getState(), Vars.state.isGame(), Core.scene.hasDialog());
+            run(3);
+            Log.info("[drv] turret 现场（3 tick 后）: picking=@", combineCall("combineunit.units.MegaTurretPicker", "picking", null));
+        }catch(Throwable t){ Log.err("[drv] turretPickPlace failed", t); }
+    }
+
+    /** 打印"选取炮台"模式里每座炮台的世界坐标（截图里的"添加"按钮应当正好压在它们头上）。 */
+    static void turretPickReport(){
+        try{
+            if(turretBeast == null) return;
+            StringBuilder sb = new StringBuilder();
+            for(Building b : new Building[]{turretPickA, turretPickB, turretPickC}){
+                if(b == null) continue;
+                sb.append("\n      ").append(b.block.localizedName)
+                  .append(" @(").append((int)b.x).append(",").append((int)b.y).append(")")
+                  .append(" 相对巨兽 dx=").append((int)(b.x - turretBeast.x))
+                  .append(" dy=").append((int)(b.y - turretBeast.y))
+                  .append(" 在吸收半径内=").append(turretBeast.dst(b) <= 64f);
+            }
+            Object picking = combineCall("combineunit.units.MegaTurretPicker", "picking", null);
+            Log.info("[drv] turret 选取模式: picking=@ 炮台舱=@ 座 世界里等待选取的炮台:@",
+                picking, turretBaySize(turretBeast), sb);
+            // 【按钮位置自检】按钮应该正好压在炮台正上方：打印每座炮台的投影坐标 + 按钮实际坐标
+            Class<?> pc = Class.forName("combineunit.units.MegaTurretPicker", true, ml);
+            java.lang.reflect.Field bf = pc.getDeclaredField("addBtns");
+            bf.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            Seq<arc.scene.Element> btns = (Seq<arc.scene.Element>)bf.get(null);
+            Log.info("[drv] turret 画面 @x@ 场景坐标系=左下原点/y 向上（arc 约定）", Core.graphics.getWidth(), Core.graphics.getHeight());
+            for(int i = 0; i < btns.size; i++){
+                arc.scene.Element e = btns.get(i);
+                Log.info("[drv]   \"添加\"[@] 按钮底边=(@,@) 尺寸=@x@ → 按钮中心x=@ 底边y=@",
+                    i, (int)e.x, (int)e.y, (int)e.getWidth(), (int)e.getHeight(),
+                    (int)(e.x + e.getWidth() / 2f), (int)e.y);
+            }
+        }catch(Throwable t){ Log.err("[drv] turretPickReport failed", t); }
+    }
+
+    /**
+     * 【真点击】拿 scene 的输入路径点第一颗「添加」按钮：坐标按 arc 的约定（左下原点、y 向上），
+     * 用按钮自己的 bounds + 父元素原点算。用来验证"看得见的按钮"和"点得到的按钮"是同一个地方。
+     */
+    static void turretPickClick(){
+        try{
+            int bay0 = turretBaySize(turretBeast);
+            // 每点一颗按钮，成功吸收后按钮会被重建（目标集合变了），所以每次都重新取列表
+            for(int round = 0; round < 3; round++){
+                Class<?> pc = Class.forName("combineunit.units.MegaTurretPicker", true, ml);
+                java.lang.reflect.Field bf = pc.getDeclaredField("addBtns");
+                bf.setAccessible(true);
+                @SuppressWarnings("unchecked")
+                Seq<arc.scene.Element> btns = (Seq<arc.scene.Element>)bf.get(null);
+                if(btns.isEmpty()){
+                    Log.info("[drv] turret: 没有剩余的「添加」按钮（点了 @ 颗）", round);
+                    break;
+                }
+                arc.scene.Element e = btns.first();
+                float ox = e.parent == null ? 0f : e.parent.x, oy = e.parent == null ? 0f : e.parent.y;
+                int sx = (int)(ox + e.x + e.getWidth() / 2f), sy = (int)(oy + e.y + e.getHeight() / 2f);
+                boolean down = Core.scene.touchDown(sx, sy, 0, arc.input.KeyCode.mouseLeft);
+                Core.scene.touchUp(sx, sy, 0, arc.input.KeyCode.mouseLeft);
+                run(15);
+                Log.info("[drv] turret: 真点击「添加」#@ 屏幕(@,@) 按钮底边(@,@) down=@ → 炮台舱 @ → @ 座，剩余按钮 @ 颗",
+                    round, sx, sy, (int)e.x, (int)e.y, down, bay0 + round, turretBaySize(turretBeast), btns.size);
+            }
+            Log.info("[drv] turret: 逐颗点完：炮台舱=@ 座（世界里 duo/scatter/wave 还在=@/@/@）", turretBaySize(turretBeast),
+                turretPickA != null && turretPickA.tile != null && turretPickA.tile.build == turretPickA,
+                turretPickB != null && turretPickB.tile != null && turretPickB.tile.build == turretPickB,
+                turretPickC != null && turretPickC.tile != null && turretPickC.tile.build == turretPickC);
+        }catch(Throwable t){ Log.err("[drv] turretPickClick failed", t); }
+    }
+
+    /** 直接点炮台本体（不走「添加」浮标）：兜底输入那条路，落点在某座待选炮台上就当"添加"。 */
+    static void turretPickTapWorld(){
+        try{
+            if(turretBeast == null) return;
+            int bx = (int)(turretBeast.x / 8f), by = (int)(turretBeast.y / 8f);
+            // ① 第 4 座（正好到舱位上限）：不走「添加」浮标，直接点炮台本体
+            Building d1 = placeBL(Blocks.duo, bx - 4, by - 3);
+            run(3);
+            int before = turretBaySize(turretBeast);
+            Object handled = combineCall("combineunit.units.MegaTurretPicker", "tapWorld",
+                new Class<?>[]{float.class, float.class}, d1.x, d1.y);
+            run(15);
+            Log.info("[drv] turret: 直接点炮台本体（兜底路）handled=@ 炮台舱 @ → @ 座（上限 @ = 成员武器数之和）",
+                handled, before, turretBaySize(turretBeast), turretBayMax(turretBeast));
+        }catch(Throwable t){ Log.err("[drv] turretPickTapWorld failed", t); }
+    }
+
+    /** 面板里勾掉"不用"某种弹药（走和面板按钮同一条 requestAmmoTune）。 */
+    static void turretAmmoToggle(){
+        try{
+            if(turretBeast == null) return;
+            Object bay = turretBeast.getClass().getMethod("bay").invoke(turretBeast);
+            @SuppressWarnings("unchecked")
+            Seq<mindustry.type.Item> list = (Seq<mindustry.type.Item>)bay.getClass().getMethod("ammoList").invoke(bay);
+            if(list.isEmpty()){ Log.info("[drv] turret 弹药: 面板没列出弹药（舱里没有物品炮台？）"); return; }
+            mindustry.type.Item first = list.first();
+            combineCall("combineunit.units.UnitComboMerge", "requestAmmoTune",
+                new Class<?>[]{Class.forName("combineunit.units.mega.MegaUnitEntity", true, ml),
+                    mindustry.type.Item.class, boolean.class},
+                turretBeast, first, true);
+            run(3);
+            Object banned = bay.getClass().getMethod("bannedAmmo").invoke(bay);
+            Log.info("[drv] turret: 面板勾掉「@」→ 禁用表=@（舱里 @ 座炮台共用这张表）",
+                first.localizedName, banned, turretBaySize(turretBeast));
+        }catch(Throwable t){ Log.err("[drv] turretAmmoToggle failed", t); }
+    }
+
+    /** 舱里每座物品炮台的弹仓内容（验证"按弹药表循环"）+ 面板会列出的弹药。 */
+    static void turretAmmoReport(){
+        try{
+            if(turretBeast == null) return;
+            Object bay = turretBeast.getClass().getMethod("bay").invoke(turretBeast);
+            @SuppressWarnings("unchecked")
+            Seq<mindustry.type.Item> list = (Seq<mindustry.type.Item>)bay.getClass().getMethod("ammoList").invoke(bay);
+            StringBuilder lb = new StringBuilder();
+            for(mindustry.type.Item it : list) lb.append(it.localizedName).append(' ');
+            Log.info("[drv] turret 弹药: 面板可选=@ 禁用表=@", lb,
+                bay.getClass().getMethod("bannedAmmo").invoke(bay));
+            @SuppressWarnings("unchecked")
+            Seq<Building> all = (Seq<Building>)bay.getClass().getMethod("all").invoke(bay);
+            for(Building b : all){
+                if(!(b instanceof mindustry.world.blocks.defense.turrets.ItemTurret.ItemTurretBuild itb)) continue;
+                StringBuilder sb = new StringBuilder();
+                for(var e : itb.ammo){
+                    sb.append(((mindustry.world.blocks.defense.turrets.ItemTurret.ItemEntry)e).item.localizedName).append(' ');
+                }
+                Log.info("[drv]   @ 弹仓（从栈底到栈顶）=@ 总弹药=@", b.block.localizedName, sb, itb.totalAmmo);
+            }
+        }catch(Throwable t){ Log.err("[drv] turretAmmoReport failed", t); }
+    }
+
+    /** 巨兽的舱位上限（成员武器数之和）。 */
+    static int turretBayMax(Unit mega){
+        try{
+            Object bay = mega.getClass().getMethod("bay").invoke(mega);
+            return (Integer)bay.getClass().getMethod("maxTurrets").invoke(bay);
+        }catch(Throwable t){ return -1; }
+    }
+
+    /** 点某座炮台的"添加"：走和按钮完全同一条路（客户端请求 → 服务端结算）。 */
+    static void turretPickAdd(){
+        try{
+            if(turretBeast == null || turretPickB == null) return;
+            combineCall("combineunit.units.UnitComboMerge", "requestAbsorbTurret",
+                new Class<?>[]{Class.forName("combineunit.units.mega.MegaUnitEntity", true, ml), Building.class},
+                turretBeast, turretPickB);
+            run(3);
+            Log.info("[drv] turret: 点 scatter 的\"添加\" → 炮台舱=@ 座；世界里 scatter 还剩=@",
+                turretBaySize(turretBeast), turretPickB.tile != null && turretPickB.tile.build == turretPickB);
+            turretReport();
+        }catch(Throwable t){ Log.err("[drv] turretPickAdd failed", t); }
+    }
+
     /** 弹出 UnitComboBind 的"单位组合"面板（组合巨兽分支：炮台数 + 追加/释放两个按钮）。 */
     static void turretOpenPanel(){
         try{
@@ -1693,6 +1926,183 @@ public class Driver extends Mod{
             m.invoke(null);
             Log.info("[drv] turret: 组合面板已弹出（炮台 @ 座）", turretBaySize(turretBeast));
         }catch(Throwable t){ Log.err("[drv] turretOpenPanel failed", t); }
+    }
+
+    // ---------------- possess（附身 → 存盘 → 读档 还能不能开火） ----------------
+    static Unit possessBeast;
+    static long possessShots0;
+    static boolean possessFiring;
+    static arc.files.Fi possessFile;
+
+    /** 融合两只 vanquish，然后让本地玩家附身上去（= 玩家双击/ctrl+点巨兽那条路）。 */
+    static void possessMerge(){
+        try{
+            float cx = midOx * 8f, cy = midOy * 8f;
+            mergeAt(cx, cy, UnitTypes.vanquish, UnitTypes.vanquish, mu -> {
+                possessBeast = mu;
+                camTarget = mu;
+                Vars.player.unit(mu);
+                run(2);
+                Log.info("[drv] possess: 融合=@ 玩家单位==巨兽? @ 巨兽控制器=@",
+                    mu.type.name, Vars.player.unit() == mu, mu.controller());
+                // 每帧照抄 DesktopInput.updateMovement 的尾巴（和 sf 模式同一套）
+                var t = new arc.scene.ui.layout.Table();
+                t.touchable = arc.scene.event.Touchable.disabled;
+                t.update(Driver::possessFireLoop);
+                Vars.ui.hudGroup.addChild(t);
+            });
+        }catch(Throwable t){ Log.err("[drv] possessMerge failed", t); }
+    }
+
+    static void possessFireLoop(){
+        try{
+            if(!possessFiring || possessBeast == null || !possessBeast.isAdded()) return;
+            Vars.player.shooting = true;
+            possessBeast.aim(possessBeast.x + arc.math.Angles.trnsx(possessBeast.rotation(), 200f),
+                possessBeast.y + arc.math.Angles.trnsy(possessBeast.rotation(), 200f), true);
+            possessBeast.controlWeapons(true, Vars.player.shooting);
+        }catch(Throwable t){ Log.err("[drv] possessFireLoop failed", t); }
+    }
+
+    static void possessFireStart(){
+        possessFiring = true;
+        possessShots0 = possessBeast == null ? 0 : totalShots(possessBeast);
+    }
+
+    /**
+     * 连着 n 个**逻辑 tick** 照抄 DesktopInput 的尾巴（瞄准 + 按住开火），再看打出多少发。
+     * 不用渲染帧回调：这台软渲染客户端一帧要一秒多，靠帧回调根本推不动（实测 36 秒才 27 帧）。
+     */
+    static void possessFireBurst(String tag){
+        try{
+            possessFiring = false;
+            if(possessBeast == null) return;
+            possessShots0 = totalShots(possessBeast);
+            for(int i = 0; i < 120; i++){
+                Vars.player.shooting = true;
+                possessBeast.aim(possessBeast.x, possessBeast.y + 200f, true);
+                possessBeast.controlWeapons(true, true);
+                run(1);
+            }
+            Vars.player.shooting = false;
+            Log.info("[drv] possess @: 同步推 120 tick（玩家按住开火）→ 巨兽开火 @ 发", tag, totalShots(possessBeast) - possessShots0);
+        }catch(Throwable t){ Log.err("[drv] possessFireBurst failed", t); }
+    }
+
+    /**
+     * 舱里的炮台听不听玩家的鼠标：同步推 200 tick，玩家一直朝"正下"瞄 + 按住开火，
+     * 看炮台有没有转到玩家鼠标方向（≈90°）、有没有开火。
+     */
+    static void possessTurretCheck(){
+        try{
+            if(possessBeast == null) return;
+            Object bay = possessBeast.getClass().getMethod("bay").invoke(possessBeast);
+            @SuppressWarnings("unchecked")
+            Seq<Building> all = (Seq<Building>)bay.getClass().getMethod("all").invoke(bay);
+            mindustry.world.blocks.defense.turrets.Turret.TurretBuild tb = null;
+            for(Building b : all){
+                if(b instanceof mindustry.world.blocks.defense.turrets.Turret.TurretBuild t){
+                    tb = t;
+                    break;
+                }
+            }
+            if(tb == null){ Log.err("[drv] possessTurretCheck: 炮台舱里没有炮台"); return; }
+            int before = tb.totalShots;
+            for(int i = 0; i < 200; i++){
+                Vars.player.shooting = true;
+                possessBeast.aim(possessBeast.x, possessBeast.y + 200f, true);   // 正下（角度 ≈ 90°）
+                possessBeast.controlWeapons(true, true);
+                run(1);
+            }
+            Vars.player.shooting = false;
+            float want = arc.math.Angles.angle(tb.x, tb.y, possessBeast.aimX(), possessBeast.aimY());
+            Log.info("[drv] possess 舱内炮台听玩家鼠标: @ 朝向=@° 玩家鼠标方向=@° 差=@° 开火 @→@ logicControlTime=@",
+                tb.block.localizedName, (int)tb.rotation, (int)want,
+                (int)arc.math.Angles.angleDist(tb.rotation, want), before, tb.totalShots, tb.logicControlTime);
+        }catch(Throwable t){ Log.err("[drv] possessTurretCheck failed", t); }
+    }
+
+    static void possessSave(){
+        try{
+            possessFiring = false;
+            possessFile = Core.settings.getDataDirectory().child("drv_possess.msav");
+            mindustry.io.SaveIO.save(possessFile);
+            Log.info("[drv] possess: 已存盘 @（@ 字节）", possessFile.name(), possessFile.length());
+        }catch(Throwable t){ Log.err("[drv] possessSave failed", t); }
+    }
+
+    /** 和暂停菜单"载入"同一条路：SaveIO.load + 回到 playing（会触发 SaveLoadEvent/WorldLoadEvent）。 */
+    static void possessLoad(){
+        try{
+            possessFiring = false;
+            mindustry.io.SaveIO.load(possessFile);
+            Vars.state.rules.editor = false;
+            Vars.state.rules.sector = null;
+            Vars.state.set(mindustry.core.GameState.State.playing);
+            Vars.logic.play();
+            run(5);
+            possessBeast = megaUnit();
+            if(possessBeast != null) camTarget = possessBeast;
+            Log.info("[drv] possess: 读档完成 Groups.player=@ Groups.unit=@ 找到巨兽=@",
+                Groups.player.size(), Groups.unit.size(), possessBeast != null);
+        }catch(Throwable t){ Log.err("[drv] possessLoad failed", t); }
+    }
+
+    /** 读档后收起一座炮台（"选取炮台 → 添加"那条路），下面看它听不听玩家的鼠标。 */
+    static void possessAbsorbTurret(){
+        try{
+            possessFiring = false;
+            if(possessBeast == null) return;
+            int bx = (int)(possessBeast.x / 8f), by = (int)(possessBeast.y / 8f);
+            Building duo = placeBL(Blocks.duo, bx + 4, by + 3);
+            run(3);
+            Object ok = combineCall("combineunit.units.UnitComboMerge", "absorbTurretAt",
+                new Class<?>[]{Class.forName("combineunit.units.mega.MegaUnitEntity", true, ml), int.class, int.class},
+                possessBeast, duo.tile.x, duo.tile.y);
+            run(3);
+            Log.info("[drv] possess: 读档后收起一座 duo=@ 炮台舱=@ 座", ok, turretBaySize(possessBeast));
+        }catch(Throwable t){ Log.err("[drv] possessAbsorbTurret failed", t); }
+    }
+
+    /** 打印"玩家/巨兽/武器/舱里炮台"的状态，看玩家还能不能驱动这只巨兽、舱里的炮台听不听玩家。 */
+    static void possessReport(String tag){
+        try{
+            Unit u = possessBeast;
+            if(u == null) u = megaUnit();
+            StringBuilder mounts = new StringBuilder();
+            if(u != null){
+                for(var m : u.mounts()){
+                    mounts.append("\n      [").append(m.weapon.name).append("] shoot=").append(m.shoot)
+                        .append(" rotate=").append(m.rotate).append(" targetRot=").append((int)m.targetRotation)
+                        .append(" totalShots=").append(m.totalShots);
+                }
+            }
+            Log.info("[drv] possess @: Vars.player.unit()=@ 巨兽=@ 巨兽控制器=@ dead=@ "
+                    + "player.shooting=@ 玩家单位==巨兽? @ 开火数(@)=@",
+                tag,
+                Vars.player.unit() == null ? "null" : Vars.player.unit().type.name,
+                u == null ? "null" : u.type.name,
+                u == null ? "-" : String.valueOf(u.controller()),
+                u == null ? "-" : String.valueOf(u.dead()),
+                Vars.player.shooting,
+                u != null && Vars.player.unit() == u,
+                possessFiring ? "本轮" : "累计",
+                u == null ? -1 : totalShots(u) - Math.max(possessShots0, 0));
+            if(mounts.length() > 0) Log.info("[drv] possess @ 武器状态:@", tag, mounts);
+            // 舱里的炮台：玩家操控时应当瞄着玩家的鼠标（瞄准点 = 巨兽的 aimX/aimY）
+            if(u != null){
+                Object bay = u.getClass().getMethod("bay").invoke(u);
+                @SuppressWarnings("unchecked")
+                Seq<Building> all = (Seq<Building>)bay.getClass().getMethod("all").invoke(bay);
+                for(Building b : all){
+                    if(!(b instanceof mindustry.world.blocks.defense.turrets.Turret.TurretBuild tb)) continue;
+                    float want = arc.math.Angles.angle(b.x, b.y, u.aimX(), u.aimY());
+                    Log.info("[drv] possess @ 舱内炮台 @: 朝向=@° 玩家鼠标方向=@° 差=@° logicControlTime=@ 开火=@ 弹药=@",
+                        tag, b.block.localizedName, (int)tb.rotation, (int)want,
+                        (int)arc.math.Angles.angleDist(tb.rotation, want), tb.logicControlTime, tb.totalShots, tb.totalAmmo);
+                }
+            }
+        }catch(Throwable t){ Log.err("[drv] possessReport failed", t); }
     }
 
     static void shot(String name){
