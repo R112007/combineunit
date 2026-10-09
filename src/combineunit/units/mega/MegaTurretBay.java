@@ -700,7 +700,22 @@ public class MegaTurretBay{
     }
 
     private void feedFromCore(Building b, ItemTurret it, ItemTurret.ItemTurretBuild itb){
-        if(itb.cheating()) return;                     // 无限火力模式原版自己管，别重复扣
+        // 【作弊/沙盒规则（team.rules().cheat = 方块不耗资源）】以前这里直接 return，以为"原版自己管"——
+        // 但原版给作弊炮台塞第一份弹药的地方是 ItemTurretBuild.onProximityAdded()，而巨兽炮台是
+        // 手工 create() + 挂假格的，**永远走不到那条路**：弹仓恒空 → hasAmmo() 恒 false →
+        // 物品炮台一发都不打，而液体/电力炮台（supply() 直接灌满/给电）照常开火 ——
+        // 正是用户报的"有的炮台不发射，哪怕核心有弹药，比如 cyclone…所有的炮都是有的发射有的不发射"
+        // （沙盒里核心物品是无限的，看着"有弹药"却打不出来）。作弊模式不扣核心库存，直接补满弹仓。
+        if(itb.cheating()){
+            Seq<Item> usable = usableAmmo(it);
+            if(usable.isEmpty() || itb.totalAmmo >= it.maxAmmo) return;
+            Item pick = usable.first();
+            int guard = 0;
+            while(itb.totalAmmo < it.maxAmmo && itb.acceptItem(itb, pick) && guard++ < 4096){
+                itb.handleItem(itb, pick);
+            }
+            return;
+        }
         // 【补到满仓为止】不能只补半仓：ammoPerShot 大的炮台（阻碍每发30/仓30、死诏每发8/仓24…）
         // 半仓根本凑不齐一发，表现就是"怎么都不开火"；同时按弹药表轮流喂，仍是"打一发换一种"。
         if(itb.totalAmmo >= it.maxAmmo) return;

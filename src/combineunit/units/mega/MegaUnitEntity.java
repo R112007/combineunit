@@ -2657,9 +2657,19 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc {
                         }
                     }
                 } else {
-                    // 不是 DrawTurret 的 drawer（DrawMulti / 模组自定义）：当前 z 上交给它自己画
-                    Draw.z(z);
-                    b.draw();
+                    // 不是 DrawTurret 的 drawer（DrawMulti / 模组自定义）：抬**嵌套**的 DrawTurret 的层号后
+                    // 再交给它自己画。模组炮台常写成 `drawer = new DrawMulti(new DrawRegion(...), new DrawTurret())`
+                    // ——里面那颗 DrawTurret 会把本体/parts 画在 Layer.turret(50)，低于巨兽机身(60) →
+                    // 只看得见底板，"炮台的 drawer/parts 没画"（用户报的）。DrawMulti.drawers 是公开数组，能走进去抬。
+                    Seq<Object[]> raised = b.block instanceof Turret
+                            ? raiseNestedTurretLayers(((Turret) b.block).drawer, z, new Seq<>())
+                            : new Seq<>();
+                    try {
+                        Draw.z(z);
+                        b.draw();
+                    } finally {
+                        restoreTurretLayers(raised);
+                    }
                 }
             } catch (Throwable ignored) {
                 // 一座炮台的贴图出问题不能把巨兽的绘制带崩
@@ -2754,6 +2764,43 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc {
             }
         }
         Draw.z(z);
+    }
+
+    /**
+     * 走进一个抽屉（含 {@code DrawMulti} 的子树），把里面每一颗 {@code DrawTurret} 的三个层号都抬到 {@code z}，
+     * 返回"还原用"的记录（{@code [DrawTurret, 旧turretLayer, 旧shadowLayer, 旧heatLayer]}，成对调用
+     * {@link #restoreTurretLayers}）。画完必须还原 —— 这些是方块上**共享**的抽屉实例，
+     * 世界里正常摆着的同一型号炮台还要按原版层号画。
+     */
+    private static Seq<Object[]> raiseNestedTurretLayers(mindustry.world.draw.DrawBlock drawer, float z,
+                                                         Seq<Object[]> out) {
+        if (drawer == null)
+            return out;
+        if (drawer instanceof DrawTurret dt) {
+            out.add(new Object[] { dt, dt.turretLayer, dt.shadowLayer, dt.heatLayer });
+            dt.turretLayer = z;
+            dt.shadowLayer = z - 0.5f;
+            dt.heatLayer = z + 0.05f;
+            raisePartHeatLayer(dt.parts, z);
+            for (var parts : dt.ammoParts.values())
+                raisePartHeatLayer(parts, z);
+        } else if (drawer instanceof mindustry.world.draw.DrawMulti dm && dm.drawers != null) {
+            for (var child : dm.drawers)
+                raiseNestedTurretLayers(child, z, out);
+        }
+        return out;
+    }
+
+    /** 把 {@link #raiseNestedTurretLayers} 抬起来的层号还原回去。 */
+    private static void restoreTurretLayers(Seq<Object[]> raised) {
+        if (raised == null)
+            return;
+        for (Object[] r : raised) {
+            DrawTurret dt = (DrawTurret) r[0];
+            dt.turretLayer = (Float) r[1];
+            dt.shadowLayer = (Float) r[2];
+            dt.heatLayer = (Float) r[3];
+        }
     }
 
     /** parts 的热量层也抬到巨兽机身之上（RegionPart 的 turretHeatLayer 是写死的 50.1）。 */

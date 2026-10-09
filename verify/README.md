@@ -27,6 +27,7 @@ for t in SanityCheck MegaEnvTest MegaFieldTest MegaWaterTest MegaHoverTest MegaH
          MegaStatSumTest MegaSurviveTest MegaSyncTest MegaGhostMemberTest MegaClipSizeTest \
          MegaGhostTest ComboFireSupportTest MegaNullControllerTest MegaNullTypeTest \
          MegaBuilderAiNpeTest CoreUnitSyncTest MegaFlyingPathTest MegaHoverStuckTest \
+         MegaTurretFireTest MegaTurretCheatFireTest \
          MegaCampaignWaveTest MegaCampaignSweepTest MegaUserSaveWaveTest; do
   verify/run-headless.sh mx /tmp/mp_unit/data combineunit.dbg.$t
 done
@@ -336,3 +337,22 @@ verify/deliver.sh        # = 兼容安卓编译 + 检查调试残留 + 只把 ja
 软渲染客户端一帧很慢（~5fps），别用 0.5 秒小间隔下结论。联机/长跑工具（代理、看门狗）必须
 "线程数与事件数无关"，超上限就主动退出 —— 否则会把 proot（单线程 ptrace 事件循环）拖成活锁，
 整个会话（含 codex 自己）一起冻死。细节见 combine 仓库 `AGENTS.md` 与 `/root/.codex/AGENTS.md`。
+
+## 6. 巨兽炮台舱：绘制与补给的钉子（2026-10-09）
+
+- `MegaTurretCheatFireTest`（`/tmp/mp_unit/data`）：用户报"**有的炮台不发射，哪怕核心有弹药，
+  比如 cyclone 等，所有的炮都是有的发射有的不发射**"。根因是沙盒/作弊规则
+  （`team.rules().cheat` = 方块不耗资源）下 `feedFromCore` 直接 return —— 原版给作弊炮台塞第一份
+  弹药的地方是 `ItemTurretBuild.onProximityAdded()`，而巨兽炮台是手工 `create()` + 挂假格造出来的、
+  永远走不到那条路，于是**物品炮台弹仓恒空、一发都不打**，液体/电力炮台（`supply()` 直接灌满/给电）
+  照常开火。判定：2 cyclone + 2 duo（物品）+ 1 wave（液体对照）吸进舱，普通 / cheat / 无限资源
+  三种规则各 600 tick，每种规则下 4 座物品炮台都必须开火。修后 8/8 PASS；拿旧包
+  （`combinec/res/combineunit.jar`，Oct-8）跑同一套：`cheat=true cyclone=0 0 duo=0 0 wave=178` = FAIL。
+- **炮台绘制**：`MegaUnitEntity.drawTurrets(z)` 必须把炮台的层号抬到巨兽机身（`Layer.groundUnit` 60）
+  之上，否则本体/parts 落在 `Layer.turret`(50) 被机身盖住、只剩底板（用户报的"drawer 和 part 没画"）。
+  原版 `DrawTurret` 直接改它的 `turretLayer/shadowLayer/heatLayer`；模组常见的
+  `new DrawMulti(DrawRegion, new DrawTurret(){…})` 要走进 `DrawMulti.drawers` 抬**嵌套**的
+  `DrawTurret`（`raiseNestedTurretLayers`），画完还原（抽屉实例是方块上共享的）。
+  真客户端核对：`verify/run-client.sh mx /tmp/mp_unit/data turret` 的 `*_turret_clean.png`
+  （对照行：同样的 duo/scatter/wave/cyclone 摆在吸收半径外，被吸进巨兽的那几座要和它们长得一样）；
+  装饱和火力时（`/tmp/mp_sf2/data`）还会额外吸一座 `DrawMulti` 炮台（饱和火力-短波雷达）看嵌套绘制。

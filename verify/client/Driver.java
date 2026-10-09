@@ -250,6 +250,7 @@ public class Driver extends Mod{
                 Timer.schedule(Driver::setupMidScene, 5f);
                 Timer.schedule(Driver::turretMerge, 10f);
                 Timer.schedule(Driver::turretPlace, 13f);
+                Timer.schedule(() -> shot("turret_clean"), 15f);   // 靶子出现前的干净一帧：对照被吸收的炮台
                 Timer.schedule(Driver::turretAddEnemy, 16f);
                 Timer.schedule(Driver::turretReport, 18f);
                 Timer.schedule(() -> Vars.renderer.setScale(3f), 19f);
@@ -1650,12 +1651,37 @@ public class Driver extends Mod{
             Building duo = placeBL(Blocks.duo, bx + 5, by);         // 物品炮台（弹药从核心扣）
             Building scatter = placeBL(Blocks.scatter, bx + 5, by + 3);
             Building wave = placeBL(Blocks.wave, bx + 1, by + 5);    // 液体炮台（直接补给）
+            Building cyclone = placeBL(Blocks.cyclone, bx + 5, by + 6); // 3x3 大炮台（parts = 3 根炮管）
             Building far = placeBL(Blocks.duo, bx + 22, by + 14);   // 远处对照
+            // 【对照行】同样的四种炮台摆在吸收半径（hitSize+24 = 80px）之外的巨兽下方：
+            // 截图里"世界里的原版炮台"和"被吸进巨兽的复制品"应当长得一模一样
+            //（底板/本体/parts 都在）。这是判断"炮台 drawer 画没画"的直接对照。
+            placeBL(Blocks.duo, bx - 7, by + 17);
+            placeBL(Blocks.scatter, bx - 3, by + 19);
+            placeBL(Blocks.wave, bx + 1, by + 17);
+            placeBL(Blocks.cyclone, bx + 5, by + 19);
+            // 【DrawMulti 抽屉的模组炮台】模组里常见 `new DrawMulti(DrawRegion, new DrawTurret(){…})`：
+            // 巨兽炮台舱必须走进 DrawMulti 把嵌套的 DrawTurret 层号抬起来，否则本体/parts 落在
+            // Layer.turret(50) 被机身(60) 盖住 —— 见 MegaUnitEntity.raiseNestedTurretLayers。
+            // 有这种炮台的数据集（例如饱和火力）就一并吸一座，截图里能直接看它有没有画全。
+            Block multi = null;
+            for(Block cb : Vars.content.blocks()){
+                if(cb instanceof mindustry.world.blocks.defense.turrets.Turret t
+                    && t.drawer instanceof mindustry.world.draw.DrawMulti && cb.size <= 5){
+                    if(multi == null || cb.size < multi.size) multi = cb;
+                }
+            }
+            if(multi != null){
+                Building mb = placeBL(multi, bx - 4, by + 6);
+                Log.info("[drv] turret: DrawMulti 炮台 @ size=@ 放下=@（用于验证嵌套 DrawTurret 层号）",
+                    multi.name, multi.size, mb != null);
+            }
             run(2);
             Object n = combineCall("combineunit.units.UnitComboMerge", "absorbNearbyTurrets",
                 new Class<?>[]{Class.forName("combineunit.units.mega.MegaUnitEntity", true, ml)}, turretBeast);
             Log.info("[drv] turret: 放置后吸收=@ 炮台舱=@ 座（duo=@ scatter=@ wave=@ far=@）",
                 n, turretBaySize(turretBeast), duo != null, scatter != null, wave != null, far != null);
+            Log.info("[drv] turret: cyclone 放置=@", cyclone != null);
         }catch(Throwable t){ Log.err("[drv] turretPlace failed", t); }
     }
 
@@ -1716,11 +1742,13 @@ public class Driver extends Mod{
                 }else{
                     ammo = "-";
                 }
+                int shots = b instanceof mindustry.world.blocks.defense.turrets.Turret.TurretBuild tb ? tb.totalShots : -1;
                 sb.append("\n      ").append(b.block.localizedName)
                   .append(" 相对巨兽 dx=").append(String.format("%.1f", b.x - turretBeast.x))
                   .append(" dy=").append(String.format("%.1f", b.y - turretBeast.y))
                   .append(" 朝向=").append(b.rotation)
                   .append(" 血量=").append(String.format("%.0f", b.health))
+                  .append(" 开火=").append(shots)
                   .append(" ").append(ammo);
             }
             Log.info("[drv] turret 巨兽: hitSize=@ rotation=@ 炮台舱=@ 座@",
