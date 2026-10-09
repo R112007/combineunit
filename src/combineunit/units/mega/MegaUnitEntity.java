@@ -2663,29 +2663,14 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc {
                 drawTurretIcon(b, z);
                 return;
             }
-                    if (turret.drawer.getClass() == DrawTurret.class) {
-                        // 原版 DrawTurret：照 combine 仓库 SuperTurret.drawCellDrawer 复刻一遍，
-                        // 但**所有层都落在 z 上** —— 底板/本体/液体/top/热量/描边/parts/ammoParts
-                        // 一件不落（用户 2026-10-09："炮台的 drawer 和 part 没画，参考一下合体炮台"）。
-                        drawTurretDrawer(b, turret, dt, z);
-                    } else {
-                        // 模组自定义的 DrawTurret 子类：抬它自己的层号后仍走它的 draw()，保留自定义逻辑
-                        float lt = dt.turretLayer, ls = dt.shadowLayer, lh = dt.heatLayer;
-                        dt.turretLayer = z;
-                        dt.shadowLayer = z - 0.5f;
-                        dt.heatLayer = z + 0.05f;
-                        raisePartHeatLayer(dt.parts, z);
-                        for (var parts : dt.ammoParts.values())
-                            raisePartHeatLayer(parts, z);
-                        try {
-                            Draw.z(z);
-                            b.draw();
-                        } finally {
-                            dt.turretLayer = lt;
-                            dt.shadowLayer = ls;
-                            dt.heatLayer = lh;
-                        }
-                    }
+            // 【一律走"复刻"这条路，包括 DrawTurret 子类】用户 2026-10-09 二报：
+            // "有 drawer 画部件的炮台都只显示一个 base"。子类以前是直接 b.draw()，它内部怎么设层号
+            // 我们管不着：DrawTurret.draw 只把**自己的** turretLayer 用在它自己那段上，子类覆写的
+            // drawTurret/drawHeat、以及部件自带的绝对层号（RegionPart.layer>0）照样会钉在
+            // Layer.turret(50) → 低于巨兽机身(60) → 玩家只看得见底板。
+            // 这里和 combine 仓库 SuperTurret.drawCellDrawer 完全同口径：底板/本体/液体/top/热量/
+            // 描边/parts/ammoParts **全部**在巨兽这一层上亲手画一遍，一件不落、逐件 try 隔离。
+            drawTurretDrawer(b, turret, dt, z);
         } else {
                     // 不是 DrawTurret 的 drawer（DrawMulti / 模组自定义）：抬**嵌套**的 DrawTurret 的层号后
                     // 再交给它自己画。模组炮台常写成 `drawer = new DrawMulti(new DrawRegion(...), new DrawTurret())`
@@ -2870,7 +2855,16 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc {
             return;
 
         // ④ 描边 + parts（原版同一段；逐件隔离）
+        // 【部件自带的绝对层号也要抬】RegionPart/ShapePart 的 `layer > 0` 是绝对层（例如
+        // Layer.turret=50），直接画会钻到巨兽机身(60)下面 —— 用户 2026-10-09 报的
+        // "有 drawer 画部件的炮台都只显示一个 base"，一部分就是它。画前临时改成巨兽这一层，
+        // 画完还原（部件对象是方块上共享的，世界里的同型号炮台还要按原层号画）。
+        Seq<Object[]> raisedLayers = new Seq<>();
+        raisePartLayers(dt.parts, z, raisedLayers);
+        for (var arr : dt.ammoParts.values())
+            raisePartLayers(new Seq<>(arr), z, raisedLayers);
         raisePartHeatLayer(dt.parts, z);
+        try {
         if (dt.parts.size > 0) {
             if (dt.outline != null && dt.outline.found()) {
                 Draw.z(z - 0.01f);
@@ -2907,6 +2901,9 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc {
                 }
             }
         }
+        } finally {
+            restorePartLayers(raisedLayers);
+        }
         Draw.z(z);
     }
 
@@ -2928,6 +2925,10 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc {
             raisePartHeatLayer(dt.parts, z);
             for (var parts : dt.ammoParts.values())
                 raisePartHeatLayer(parts, z);
+            // 部件自带的绝对层号（layer>0）也一起抬（记录成 3 元组，见 restoreTurretLayers）
+            raisePartLayers(dt.parts, z, out);
+            for (var arr : dt.ammoParts.values())
+                raisePartLayers(new Seq<>(arr), z, out);
         } else if (drawer instanceof mindustry.world.draw.DrawMulti dm && dm.drawers != null) {
             for (var child : dm.drawers)
                 raiseNestedTurretLayers(child, z, out);
@@ -2940,10 +2941,90 @@ public class MegaUnitEntity extends UnitEntity implements Legsc, Crawlc, Tankc {
         if (raised == null)
             return;
         for (Object[] r : raised) {
+            if (r.length != 4) { // 部件层号记录（{part, field, 旧值}）
+                try {
+                    ((java.lang.reflect.Field) r[1]).setFloat(r[0], (Float) r[2]);
+                } catch (Throwable ignored) {
+                }
+                continue;
+            }
             DrawTurret dt = (DrawTurret) r[0];
             dt.turretLayer = (Float) r[1];
             dt.shadowLayer = (Float) r[2];
             dt.heatLayer = (Float) r[3];
+        }
+    }
+
+    /** 部件 `layer` / `children` 字段的反射缓存（RegionPart / ShapePart / HaloPart 都是普通字段）。 */
+    private static final arc.struct.ObjectMap<Class<?>, java.lang.reflect.Field> partLayerCache =
+            new arc.struct.ObjectMap<>();
+    private static final arc.struct.ObjectMap<Class<?>, java.lang.reflect.Field> partChildrenCache =
+            new arc.struct.ObjectMap<>();
+
+    /** 按名字找声明字段（含父类），找不到缓存 null 不再重复找。 */
+    private static @Nullable java.lang.reflect.Field declaredField(Class<?> cls, String name,
+                                                                   arc.struct.ObjectMap<Class<?>, java.lang.reflect.Field> cache) {
+        if (cache.containsKey(cls))
+            return cache.get(cls);
+        java.lang.reflect.Field found = null;
+        for (Class<?> c = cls; c != null && c != Object.class; c = c.getSuperclass()) {
+            try {
+                java.lang.reflect.Field f = c.getDeclaredField(name);
+                f.setAccessible(true);
+                found = f;
+                break;
+            } catch (Throwable ignored) {
+            }
+        }
+        cache.put(cls, found);
+        return found;
+    }
+
+    /**
+     * 把部件（含 children）自带的**绝对层号** `layer > 0` 临时改成巨兽这一层 {@code z}。
+     *
+     * <p>为什么必须抬：{@code RegionPart.draw()} 第一件事就是 {@code if(layer > 0) Draw.z(layer)} ——
+     * 部件把层号写在 50（Layer.turret）这类绝对层上时，巨兽身上画出来就被机身(60)盖住，
+     * 看起来"整座炮台只剩一个 base"（用户 2026-10-09 报的）。画完用 {@link #restorePartLayers} 还原，
+     * 因为部件对象是方块上共享的，世界里正常摆的同型号炮台还要按原层号画。
+     */
+    private static void raisePartLayers(Seq<mindustry.entities.part.DrawPart> parts, float z, Seq<Object[]> out) {
+        if (parts == null)
+            return;
+        for (mindustry.entities.part.DrawPart p : parts)
+            raisePartLayer(p, z, out);
+    }
+
+    private static void raisePartLayer(mindustry.entities.part.DrawPart p, float z, Seq<Object[]> out) {
+        if (p == null)
+            return;
+        try {
+            java.lang.reflect.Field lf = declaredField(p.getClass(), "layer", partLayerCache);
+            if (lf != null) {
+                float v = lf.getFloat(p);
+                if (v > 0f) {
+                    out.add(new Object[] { p, lf, v });
+                    lf.setFloat(p, z);
+                }
+            }
+            java.lang.reflect.Field cf = declaredField(p.getClass(), "children", partChildrenCache);
+            if (cf != null && cf.get(p) instanceof Seq<?> kids)
+                for (Object o : kids)
+                    if (o instanceof mindustry.entities.part.DrawPart dp)
+                        raisePartLayer(dp, z, out);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 把 {@link #raisePartLayers} 改过的层号还原回去。 */
+    private static void restorePartLayers(Seq<Object[]> raised) {
+        if (raised == null)
+            return;
+        for (Object[] r : raised) {
+            try {
+                ((java.lang.reflect.Field) r[1]).setFloat(r[0], (Float) r[2]);
+            } catch (Throwable ignored) {
+            }
         }
     }
 
