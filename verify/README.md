@@ -164,6 +164,17 @@ verify/run-client.sh mx /tmp/mp_unit/data possess    # 附身巨兽 → 存盘 �
 吸收本身服务端权威：`UnitComboMerge.requestAbsorbTurret` → `MegaOrderPacket.turretAt`
 → `absorbTurretAt`（服务端按格重新校验同队/是炮台/在吸收半径内）。
 
+**入口交互（用户 2026-10-10 口径）：点一下单位就显示、再点一下就关掉** —— 主按钮的显隐以前是
+"正在操控 / 指挥模式选中 / 鼠标悬停"就自动浮出来，现在完全由玩家点的那一下决定：世界里点中
+**己方巨兽本体**（`MegaTurretPicker.tapWorld`，走注册在 `Core.scene` **之后**的 `InputProcessor`，
+命中判定 `hitSize*0.9`、只认己方）→ 头上出现「选取炮台」并一直跟着它；**再点同一只** → 连选取
+模式、各「添加」一起收掉（点另一只巨兽则换过去）。这条路**不消费**这次点击（原版还要靠它选中/
+操控单位）；选取模式里点炮台本体仍然吃掉点击（避免变成对巨兽的移动令）。驱动里有三行日志对照：
+`[drv] turret 点一下巨兽: handled=… 主按钮显示=…`（**false/true**）、
+`[drv] turret 点一下开/再点一下关: …`（**false/true → false/false**）、
+`[drv] turret 再点一下巨兽: handled=… picking=… 主按钮显示=…`（**true/false/false**）；
+`turretPickPlace` 进选取模式也改走"真点击主浮标"（`clickMainButton`，点不到才退回 `show()`）。
+
 **"点了「添加」却没反应"的几道兜底（用户 2026-10-08 报）**：
 
 1. **炮台本体也能点**：`MegaTurretPicker` 注册了一个 `InputProcessor`（排在 `Core.scene` **之后**，

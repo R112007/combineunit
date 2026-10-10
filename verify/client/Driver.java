@@ -259,6 +259,7 @@ public class Driver extends Mod{
                 Timer.schedule(Driver::turretReport, 28f);
                 Timer.schedule(() -> shot("turret_rot0"), 30f);
                 // ---- 第二阶段：手动"选取炮台"（用户要求的新交互）----
+                Timer.schedule(Driver::turretPickToggle, 31.2f);   // 点一下巨兽开 / 再点一下关（2026-10-10 口径）
                 Timer.schedule(Driver::turretPickPlace, 32f);
                 Timer.schedule(Driver::turretPickReport, 34f);
                 Timer.schedule(() -> shot("turret_pick"), 34.6f);
@@ -267,6 +268,7 @@ public class Driver extends Mod{
                 Timer.schedule(Driver::turretPickReport, 38f);
                 Timer.schedule(() -> shot("turret_pick_added"), 38.6f);
                 Timer.schedule(Driver::turretPickTapWorld, 39.4f);
+                Timer.schedule(Driver::turretPickClose, 39.9f);   // 再点一下巨兽 → 收掉（2026-10-10 口径）
                 Timer.schedule(Driver::turretAmmoToggle, 40f);
                 Timer.schedule(Driver::turretAmmoReport, 40.6f);
                 // keepDialogsHidden 每秒清一次弹窗，会把组合面板一起清掉 —— 面板要在
@@ -1845,7 +1847,54 @@ public class Driver extends Mod{
     // ---------------- turret 第二阶段：手动"选取炮台"（用户要求的新交互） ----------------
     static Building turretPickA, turretPickB, turretPickC;
 
-    /** 在巨兽旁边再摆 3 座炮台（留在世界里），然后进入"选取炮台"模式。 */
+    /**
+     * 【用户 2026-10-10 口径】主按钮的显隐 = "点一下单位就显示、再点一下就关掉"：
+     * 世界里点中己方巨兽本体 → 巨兽头上出现「选取炮台」；再点同一只 → 收掉。
+     * 走和真输入同一条路（`tapWorld` 世界坐标），把两次点击的返回值与主按钮显隐打进日志。
+     */
+    static void turretPickToggle(){
+        try{
+            if(turretBeast == null){ Log.info("[drv] turret 开关自检跳过: 没有巨兽"); return; }
+            Object h1 = combineCall("combineunit.units.MegaTurretPicker", "tapWorld",
+                new Class<?>[]{float.class, float.class}, turretBeast.x, turretBeast.y);
+            run(3);
+            Object shown1 = combineCall("combineunit.units.MegaTurretPicker", "shown", null);
+            Object h2 = combineCall("combineunit.units.MegaTurretPicker", "tapWorld",
+                new Class<?>[]{float.class, float.class}, turretBeast.x, turretBeast.y);
+            run(3);
+            Object shown2 = combineCall("combineunit.units.MegaTurretPicker", "shown", null);
+            Log.info("[drv] turret 点一下开/再点一下关: 第一次 handled=@ shown=@ → 第二次 handled=@ shown=@"
+                + "（期望 false/true/false/false；handled=false = 不吃这次点击，原版照常选中/操控巨兽）",
+                h1, shown1, h2, shown2);
+        }catch(Throwable t){ Log.err("[drv] turretPickToggle failed", t); }
+    }
+
+    /**
+     * 走 scene 的真实输入路径点巨兽头上的「选取炮台」/「完成选取」浮标（和玩家手指/鼠标同一条路）。
+     * @return 主按钮当时在不在
+     */
+    static boolean clickMainButton(){
+        try{
+            Class<?> pc = Class.forName("combineunit.units.MegaTurretPicker", true, ml);
+            java.lang.reflect.Field f = pc.getDeclaredField("mainBtn");
+            f.setAccessible(true);
+            Object o = f.get(null);
+            if(!(o instanceof arc.scene.Element e)) return false;
+            float ox = e.parent == null ? 0f : e.parent.x, oy = e.parent == null ? 0f : e.parent.y;
+            int sx = (int)(ox + e.x + e.getWidth() / 2f), sy = (int)(oy + e.y + e.getHeight() / 2f);
+            boolean down = Core.scene.touchDown(sx, sy, 0, arc.input.KeyCode.mouseLeft);
+            Core.scene.touchUp(sx, sy, 0, arc.input.KeyCode.mouseLeft);
+            Log.info("[drv] turret 真点击主浮标「@」屏幕(@,@) 按钮底边=(@,@) down=@",
+                o instanceof arc.scene.ui.TextButton tb ? tb.getText().toString() : "?",
+                sx, sy, (int)e.x, (int)e.y, down);
+            return true;
+        }catch(Throwable t){ Log.err("[drv] clickMainButton failed", t); return false; }
+    }
+
+    /**
+     * 在巨兽旁边再摆 3 座炮台（留在世界里），然后走**用户真正的入口**进入"选取炮台"模式：
+     * 点一下巨兽本体 → 头上出现「选取炮台」 → 点那颗浮标（走 scene 真实输入路径）。
+     */
     static void turretPickPlace(){
         try{
             if(turretBeast == null) return;
@@ -1855,8 +1904,20 @@ public class Driver extends Mod{
             turretPickB = placeBL(Blocks.scatter, bx + 4, by + 2);
             turretPickC = placeBL(Blocks.wave, bx - 4, by + 3);
             run(3);
-            // 和"点巨兽 → 选取炮台"同一个入口（面板按钮 / 巨兽头上的浮标都走它）
-            combineCall("combineunit.units.MegaTurretPicker", "show", new Class<?>[]{Unit.class}, turretBeast);
+            // ① 点一下巨兽：按钮这才出现（以前是操控/悬停就自动浮出来）
+            Object handled = combineCall("combineunit.units.MegaTurretPicker", "tapWorld",
+                new Class<?>[]{float.class, float.class}, turretBeast.x, turretBeast.y);
+            run(3);
+            Log.info("[drv] turret 点一下巨兽: handled=@（false = 不吃掉点击，原版还要选中/操控它）主按钮显示=@",
+                handled, combineCall("combineunit.units.MegaTurretPicker", "shown", null));
+            // ② 再点巨兽头上的那颗「选取炮台」才是进选取模式（同玩家手指/鼠标的路）
+            clickMainButton();
+            run(3);
+            if(!Boolean.TRUE.equals(combineCall("combineunit.units.MegaTurretPicker", "picking", null))){
+                Log.err("[drv] turret: 点「选取炮台」浮标没进选取模式，退回直接 show()（后面的截图/日志仍有效）");
+                combineCall("combineunit.units.MegaTurretPicker", "show", new Class<?>[]{Unit.class}, turretBeast);
+                run(3);
+            }
             Log.info("[drv] turret: 选取炮台模式已开（清场后炮台舱=@ 座；世界里 duo=@ scatter=@ wave=@）",
                 turretBaySize(turretBeast), turretPickA != null, turretPickB != null, turretPickC != null);
             // 【现场诊断】选取模式被 tick() 复位只有两种可能：不在游戏里（reset）或 pickable() 为假
@@ -1950,6 +2011,19 @@ public class Driver extends Mod{
             Log.info("[drv] turret: 直接点炮台本体（兜底路）handled=@ 炮台舱 @ → @ 座（上限 @ = 成员武器数之和）",
                 handled, before, turretBaySize(turretBeast), turretBayMax(turretBeast));
         }catch(Throwable t){ Log.err("[drv] turretPickTapWorld failed", t); }
+    }
+
+    /** 【再点一下就关掉】选取模式里再点一下巨兽本体 → picking 与主按钮一起收掉（2026-10-10 口径）。 */
+    static void turretPickClose(){
+        try{
+            if(turretBeast == null) return;
+            Object handled = combineCall("combineunit.units.MegaTurretPicker", "tapWorld",
+                new Class<?>[]{float.class, float.class}, turretBeast.x, turretBeast.y);
+            run(3);
+            Object picking = combineCall("combineunit.units.MegaTurretPicker", "picking", null);
+            Log.info("[drv] turret 再点一下巨兽: handled=@ picking=@ 主按钮显示=@（期望 true/false/false）",
+                handled, picking, combineCall("combineunit.units.MegaTurretPicker", "shown", null));
+        }catch(Throwable t){ Log.err("[drv] turretPickClose failed", t); }
     }
 
     /** 面板里勾掉"不用"某种弹药（走和面板按钮同一条 requestAmmoTune）。 */
