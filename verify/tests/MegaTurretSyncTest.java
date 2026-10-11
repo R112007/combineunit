@@ -159,14 +159,15 @@ public class MegaTurretSyncTest implements ApplicationListener{
             check("吸收走了跨网络同步接口 → 发出 RemoveTileCallPacket（客户端才会跟着删）",
                 rm != null && rm.tile != null && rm.tile.x == lx && rm.tile.y == ly);
 
-            // 记下被吸收的那座（放回要在服务端保留它的状态）
+            // 记下舱里那座（服务端不再复用世界里那栋建筑，而是按 rebuild 的路子重建一个全新实例）
             Building inside = null;
             try{
                 Object bay = mega.getClass().getMethod("bay").invoke(mega);
                 Seq<Building> all = (Seq<Building>)bay.getClass().getMethod("all").invoke(bay);
                 inside = all.isEmpty() ? null : all.first();
             }catch(Throwable t){ System.out.println("[MTS] 读炮台舱失败: " + t); }
-            check("炮台舱里是原来那座实例（状态保留的前提）", inside == duo);
+            check("炮台舱里是重建出来的新实例（不复用世界里那座，和客户端/读档一致）",
+                inside != null && inside != duo && inside.block == duo.block);
 
             // ---------- 放回：必须发 ConstructFinishCallPacket ----------
             spy.sent.clear();
@@ -176,8 +177,8 @@ public class MegaTurretSyncTest implements ApplicationListener{
             check("放回走了跨网络同步接口 → 发出 ConstructFinishCallPacket（客户端才会看到炮台回来）",
                 cf != null && cf.tile != null && cf.block == Blocks.duo);
             check("放回后世界里又有那座炮台", cf != null && cf.tile != null && Vars.world.build(cf.tile.x, cf.tile.y) != null);
-            check("服务端放回的是原来那座实例（血量/弹药等状态没丢）",
-                cf != null && cf.tile != null && Vars.world.build(cf.tile.x, cf.tile.y) == duo);
+            check("放回的是舱里那座实例（舱里的血量等状态跟着回到世界）",
+                cf != null && cf.tile != null && Vars.world.build(cf.tile.x, cf.tile.y) == inside);
 
             System.out.println("[MTS] RESULT " + (fail == 0 ? "ALL PASS" : (fail + " FAILED")) + " (pass=" + pass + " fail=" + fail + ")");
             System.exit(fail == 0 ? 0 : 1);

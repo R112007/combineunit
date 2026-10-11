@@ -34,11 +34,14 @@ import static mindustry.Vars.*;
  *
  * <h3>机制</h3>
  * <ul>
- *     <li>内部世界 {@link #innerWorld} 是一个 {@link World}，只有炮台摆在里面。吸收时把真实世界
- *         的 {@link Building} 整个搬进去：先 {@link Tile#setBlock} 成 air（走原版流程：onRemoved、
- *         从 Groups.build / 队伍索引里摘掉），再<b>绕过 setBlock</b>手动把内部格指给它
- *         （{@link Tile#updateBlockReference} + {@link Tile#build}）——不触发事件、不再进 Groups、
- *         也不污染队伍的 buildingTree/turretTree（否则会在地图角落留下一堆幽灵索敌目标）。</li>
+ *     <li>内部世界 {@link #innerWorld} 是一个 {@link World}，只有炮台摆在里面。吸收时先
+ *         {@link Tile#removeNet} 把真实世界那格清掉（走原版流程：onRemoved、从 Groups.build /
+ *         队伍索引里摘掉，并把删格同步给客户端），再按客户端 {@link #rebuild} 的同一套
+ *         <b>重建一个全新实例</b>摆进去（{@code newBuilding + create}，见 {@link #makeTurret}；
+ *         不复用世界里的建筑 —— 它带着目标 / 玩家控制器等运行时状态，见 {@link #absorb}），
+ *         最后<b>绕过 setBlock</b>手动把内部格指向它（{@link Tile#updateBlockReference} +
+ *         {@link Tile#build}）——不触发事件、不再进 Groups、也不污染队伍的
+ *         buildingTree/turretTree（否则会在地图角落留下一堆幽灵索敌目标）。</li>
  *     <li>每 tick 把内部世界坐标按巨兽朝向投影到世界坐标（{@link #project}，和原版武器挂载同一套
  *         {@code Angles.trns(rotation - 90)} 口径），再调 {@link Building#update()}。
  *         {@code Vars.world} 全程保持真实世界，这样索敌（Units.closestEnemy）、起火、灭火判定
@@ -432,19 +435,56 @@ public class MegaTurretBay{
      */
     public boolean absorb(Building b){
         if(!absorbable(b, mega.team)) return false;
+        if(b.tile == null) return false;
         if(turrets.size >= maxTurrets()) return false;
         ensureWorld(gridSizeFor());
+        // 【入舱的必须是**重建出来**的全新实例，不能把世界里那栋建筑整个搬进来】
+        // 客户端收快照（read → rebuild）和读档（read → rebuild）造出来的炮台都是全新实例：
+        // BlockUnit 是默认控制器、目标 / 逻辑操控时间 / 激活计时 / 弹仓栈全是初值。而服务端
+        // （含单机）以前直接把真实建筑搬进舱，会把它在**世界里**的运行时状态一并带进来 ——
+        // 最典型、也最致命的是 BlockUnit 的 controller：玩家在合体前用原版"操控建筑"附身过
+        // 这座炮台时，它的 unit.controller 就是这个 Player；进舱后 TurretBuild.updateTile()
+        // 一直走"玩家操控"分支（开不开火只看那个玩家的扳机、效率也是 0），而本模组的
+        // driveByPlayer 用 TurretBuild.control() 驱动又会被 unit.isPlayer() 挡掉 ——
+        // 于是这座炮台**永远不攻击**：只有退出重进地图（走 rebuild 重建实例）才会好，
+        // 而且只有服务端/单人（搬的是真建筑）会中招、联机客户端（重建的实例）一切正常
+        // —— 用户报的"装在巨兽上的炮台有概率无法攻击、退出重进又好"就是这个。
+        // 换成全新实例后，服务端和客户端/读档走的是同一套状态，弹药照样从核心扣、液体照样补给。
+        Block block = b.block;
+        int rotation = b.rotation;
+        float health = b.health;
+        Building fresh = makeTurret(block, mega.team, rotation, health);
+        if(fresh == null) return false;
         // 1) 从真实世界移除：走原版的**跨网络同步删格** removeNet（= Call.removeTile）——
         //    服务端本地照旧走一遍 setBlock(air)（onRemoved、Groups.build、队伍索引/索敌树都清掉），
         //    同时把 RemoveTileCallPacket 广播给所有客户端。**不能**退回裸的 setBlock：
         //    那条路只删服务端本地，联机时客户端那份世界收不到删除通知、炮台会**留在原地**
         //    （用户报的"客户端合体后炮台还在原处"，客户端上还会多出一份"世界里 + 巨兽体内"的重复）。
         b.tile.removeNet();
-        // 2) 搬进内部世界：位置由 relayout() 统一排（偶数分两边、奇数多的一座留中间）
-        turrets.add(b);
+        // 2) 把全新实例搬进内部世界：位置由 relayout() 统一排（偶数分两边、奇数多的一座留中间）
+        turrets.add(fresh);
         relayout();
         builtSig = -1;
         return true;
+    }
+
+    /**
+     * 造一座**全新**的炮台实例 —— 和客户端 {@link #rebuild} / 读档完全同一条路
+     * （{@code block.newBuilding()} + {@code create}），只把原来那座的朝向与血量带过来
+     * （弹药/液体是"从核心扣 / 直接补给"的，不需要带；血量想保留就顺手复制过来）。
+     */
+    private Building makeTurret(Block block, Team team, int rotation, float health){
+        try{
+            Building nb = block.newBuilding();
+            if(nb == null) return null;
+            nb.create(block, team);
+            nb.rotation = rotation;
+            nb.health = Mathf.clamp(health, 1f, nb.maxHealth());
+            return nb;
+        }catch(Throwable t){
+            Log.err("[combine] 巨兽炮台舱：重建炮台实例失败 @", block, t);
+            return null;
+        }
     }
 
     /**
