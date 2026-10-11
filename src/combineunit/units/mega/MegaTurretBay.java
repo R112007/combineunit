@@ -12,6 +12,7 @@ import mindustry.content.Blocks;
 import mindustry.core.World;
 import mindustry.entities.bullet.BulletType;
 import mindustry.game.Team;
+import mindustry.gen.Call;
 import mindustry.gen.Building;
 import mindustry.gen.Player;
 import mindustry.type.Item;
@@ -48,8 +49,8 @@ import static mindustry.Vars.*;
  *     <li><b>摆放布局</b>（用户要求"和武器一样"）：每次吸收后 {@link #relayout()} 重摆全部炮台 ——
  *         <b>偶数座两边各一半（左右严格镜像）、奇数座多出来的那一座在正中间</b>；横向/前后用的是
  *         和武器挂载同一套坐标（内部世界 x 是横向、y 是前后）。</li>
- *     <li><b>解体/释放</b>：把炮台搬回真实世界（{@link #releaseAll}，用标准 setBlock 重新登记），
- *         落点优先巨兽附近，被占了就螺旋外扩。</li>
+ *     <li><b>解体/释放</b>：把炮台搬回真实世界（{@link #releaseAll}，走原版
+ *         {@code Call.constructFinish} 跨网络同步放格），落点优先巨兽附近，被占了就螺旋外扩。</li>
  * </ul>
  *
  * <h3>同步/存档</h3>
@@ -433,8 +434,12 @@ public class MegaTurretBay{
         if(!absorbable(b, mega.team)) return false;
         if(turrets.size >= maxTurrets()) return false;
         ensureWorld(gridSizeFor());
-        // 1) 从真实世界移除：走原版流程（onRemoved、Groups.build、队伍索引/索敌树都一起清掉）
-        b.tile.setBlock(Blocks.air);
+        // 1) 从真实世界移除：走原版的**跨网络同步删格** removeNet（= Call.removeTile）——
+        //    服务端本地照旧走一遍 setBlock(air)（onRemoved、Groups.build、队伍索引/索敌树都清掉），
+        //    同时把 RemoveTileCallPacket 广播给所有客户端。**不能**退回裸的 setBlock：
+        //    那条路只删服务端本地，联机时客户端那份世界收不到删除通知、炮台会**留在原地**
+        //    （用户报的"客户端合体后炮台还在原处"，客户端上还会多出一份"世界里 + 巨兽体内"的重复）。
+        b.tile.removeNet();
         // 2) 搬进内部世界：位置由 relayout() 统一排（偶数分两边、奇数多的一座留中间）
         turrets.add(b);
         relayout();
@@ -462,7 +467,15 @@ public class MegaTurretBay{
             }
             uninstall(b);
             try{
-                spot.setBlock(b.block, mega.team, b.rotation, () -> b);
+                // 【跨网络放格】走原版 constructFinish（= ConstructFinishCallPacket）：服务端本地建一份 +
+                // 广播给所有客户端。裸的 setBlock 只在服务端本地放，联机时客户端收不到"这里多了座炮台"，
+                // 只看到巨兽体内那座凭空消失 —— 和吸收方向是同一个根因（用户报的对称问题）。
+                Call.constructFinish(spot, b.block, null, (byte)Mathf.clamp(b.rotation, 0, 3), mega.team, null);
+                // 服务端把刚建的那份换成原来那座 b（保留血量/弹药/液体等状态）；客户端不需要、也没有
+                // 这些状态，照旧用 constructFinish 建出来的新实例自己模拟。
+                if(!Vars.net.client() && spot.build != null){
+                    spot.setBlock(b.block, mega.team, b.rotation, () -> b);
+                }
                 released++;
             }catch(Throwable t){
                 Log.err("[combine] 炮台放回世界失败 @", b.block, t);
