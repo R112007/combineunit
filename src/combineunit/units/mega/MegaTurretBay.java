@@ -14,8 +14,11 @@ import mindustry.entities.bullet.BulletType;
 import mindustry.game.Team;
 import mindustry.gen.Call;
 import mindustry.gen.Building;
+import mindustry.gen.Groups;
 import mindustry.gen.Player;
+import mindustry.gen.Unit;
 import mindustry.type.Item;
+import mindustry.type.ItemStack;
 import mindustry.type.Liquid;
 import mindustry.world.Block;
 import mindustry.world.Tile;
@@ -24,6 +27,10 @@ import mindustry.world.blocks.defense.turrets.ItemTurret;
 import mindustry.world.blocks.defense.turrets.LiquidTurret;
 import mindustry.world.blocks.defense.turrets.PayloadAmmoTurret;
 import mindustry.world.blocks.defense.turrets.Turret;
+import mindustry.world.consumers.Consume;
+import mindustry.world.consumers.ConsumeItemDynamic;
+import mindustry.world.consumers.ConsumeItemFilter;
+import mindustry.world.consumers.ConsumeItems;
 
 import static mindustry.Vars.*;
 
@@ -494,16 +501,16 @@ public class MegaTurretBay{
     public int releaseAll(){
         if(turrets.isEmpty()) return 0;
         int released = 0;
+        Seq<Building> pending = new Seq<>();
         Seq<Building> copy = new Seq<>(turrets);
         for(Building b : copy){
             if(b == null || b.block == null) continue;
             Tile spot = findReleaseSpot(b);
             if(spot == null){
-                // 实在没地方（巨兽悬在大水/界外）：就落在巨兽脚下，总比跟着巨兽一起消失好
-                int cx = Mathf.clamp(World.toTile(mega.x), 2, world.width() - 3);
-                int cy = Mathf.clamp(World.toTile(mega.y), 2, world.height() - 3);
-                spot = world.tile(cx, cy);
-                if(spot == null) continue;
+                // 不能退回"放在巨兽脚下"：陆地单位的碰撞体正占着那里，炮台建出来会把巨兽挤爆。
+                // 实在找不到安全格就先留在舱里，等玩家移动单位后再释放。
+                pending.add(b);
+                continue;
             }
             uninstall(b);
             try{
@@ -519,20 +526,28 @@ public class MegaTurretBay{
                 released++;
             }catch(Throwable t){
                 Log.err("[combine] 炮台放回世界失败 @", b.block, t);
+                pending.add(b);
             }
         }
         turrets.clear();
+        turrets.addAll(pending);
         builtSig = -1;
         return released;
     }
 
-    /** 给炮台在巨兽附近找个能放的落脚点：先试巨兽脚下的格，不行就螺旋外扩（最多 24 格）。 */
+    /**
+     * 给炮台在巨兽附近找个能放的落脚点：先试巨兽脚下的格，不行就螺旋外扩（最多 64 格）。
+     *
+     * <p>候选格不仅要是空地，还要避开所有正在贴地移动/站立的单位。炮台建在单位碰撞体里时，
+     * 原版会把单位往外挤并对实体造成伤害；巨兽体型大、贴着的格子多，以前释放全部炮台时
+     * 经常直接把它挤死（用户报的"陆地单位释放炮台会被炮台挤爆"）。
+     */
     private Tile findReleaseSpot(Building b){
         int size = b.block.size;
         int cx = World.toTile(mega.x), cy = World.toTile(mega.y);
         // 两轮：第一轮优先陆地（炮台不能泡在水里），第二轮实在没有陆地就允许浅水
         for(int pass = 0; pass < 2; pass++){
-            for(int r = 0; r <= 24; r++){
+            for(int r = 0; r <= 64; r++){
                 for(int dy = -r; dy <= r; dy++){
                     for(int dx = -r; dx <= r; dx++){
                         if(Math.max(Math.abs(dx), Math.abs(dy)) != r) continue;
@@ -546,6 +561,17 @@ public class MegaTurretBay{
     }
 
     private boolean canPlace(Block block, int size, int tx, int ty, boolean landOnly){
+        // 世界格的世界坐标范围（建筑锚点是左上格，偶数尺寸的中心落在格线上）。
+        float left = tx * tilesize, bottom = ty * tilesize;
+        float right = left + size * tilesize, top = bottom + size * tilesize;
+        for(Unit u : Groups.unit){
+            if(u == null || !u.isAdded() || u.isFlying()) continue;
+            // 用圆到建筑矩形的最近距离判断；额外留半格，避免贴边生成后下一帧就被挤进去。
+            float nearestX = Mathf.clamp(u.x, left, right);
+            float nearestY = Mathf.clamp(u.y, bottom, top);
+            float radius = u.hitSize() * 0.5f + tilesize * 0.5f;
+            if(Mathf.dst2(u.x, u.y, nearestX, nearestY) < radius * radius) return false;
+        }
         int off = -(size - 1) / 2;
         for(int dx = 0; dx < size; dx++){
             for(int dy = 0; dy < size; dy++){
@@ -625,6 +651,9 @@ public class MegaTurretBay{
     private void supply(Building b){
         if(b.power != null) b.power.status = 1f;
         Block block = b.block;
+        // 普通炮台可能除了弹药还要别的原料（典型：两种物品同时满足才允许开火）。
+        // 它们在巨兽体内没有邻近传送带，必须和弹药一样直接从核心补。
+        supplyRequiredItems(b, block);
         // 【冷却液/消耗型液体】原版对 ConsumeLiquid 是按"液体够不够"算效率的，效率为 0 就永远
         // 不开火 —— 巨兽体内没有管道，得直接给它灌满（用户报的"有的炮台不发射"：
         // meltdown 要水、lustre 要氮气、埃里克尔的 titan 要氢气……）。
@@ -652,6 +681,90 @@ public class MegaTurretBay{
         if(block instanceof ItemTurret it && b instanceof ItemTurret.ItemTurretBuild itb){
             feedFromCore(b, it, itb);
         }
+    }
+
+    /**
+     * 给炮台的普通物品消费者补料。
+     *
+     * <p>以前只处理 {@link ItemTurret#ammoTypes}，所以“弹药 + 另一种催化剂/燃料”或
+     * {@code consumeItems(a, b)} 的炮台即使弹药装满，效率仍是 0，永远不发射。这里按方块自己的
+     * {@link ConsumeItems}/{@link ConsumeItemDynamic} 需求，从队伍核心搬入炮台自己的 items 模块；
+     * 原版 {@code updateConsumption()} 随后照常扣除。物品过滤型消费者对非物品炮台也补一份最小库存，
+     * 但物品炮台的 {@code ConsumeItemFilter} 是弹药表本身，不能重复塞进 items 模块。
+     */
+    private void supplyRequiredItems(Building b, Block block){
+        if(b == null || block == null || b.items == null || !block.hasItems || mega.team == null)
+            return;
+        Building core = mega.team.core();
+        boolean cheat = b.cheating();
+        if(!cheat && (core == null || core.items == null || core == b))
+            return;
+
+        for(Consume cons : block.nonOptionalConsumers) feedItemConsumer(b, block, core, cons);
+        for(Consume cons : block.optionalConsumers) feedItemConsumer(b, block, core, cons);
+
+        // 非物品炮台可能用 item filter 当燃料/触媒。物品炮塔的这个 consumer 就是弹药，
+        // 已经由 feedFromCore() 走 ammo 队列，不能在这里重复喂。
+        if(!(block instanceof ItemTurret)){
+            for(Consume cons : block.nonOptionalConsumers) feedFilterItem(b, block, core, cons);
+            for(Consume cons : block.optionalConsumers) feedFilterItem(b, block, core, cons);
+        }
+    }
+
+    /** 补显式/动态物品需求；item filter 留到单独一步，便于物品炮塔跳过弹药消费者。 */
+    private void feedItemConsumer(Building b, Block block, Building core, Consume cons){
+        if(cons instanceof ConsumeItems ci){
+            if(ci.items != null)
+                for(ItemStack stack : ci.items)
+                    feedStack(b, block, core, stack);
+        }else if(cons instanceof ConsumeItemDynamic dynamic){
+            try{
+                ItemStack[] stacks = dynamic.items.get(b);
+                if(stacks != null)
+                    for(ItemStack stack : stacks)
+                        feedStack(b, block, core, stack);
+            }catch(Throwable ignored){
+            }
+        }
+    }
+
+    private void feedFilterItem(Building b, Block block, Building core, Consume cons){
+        if(!(cons instanceof ConsumeItemFilter filter) || filter.filter == null)
+            return;
+        for(Item item : content.items()){
+            if(filter.filter.get(item) && (b.cheating()
+                    || (core != null && core.items != null && core.items.get(item) > 0))){
+                feedFromCoreItems(b, core, item, Math.max(block.itemCapacity, 1));
+                break;
+            }
+        }
+    }
+
+    private void feedStack(Building b, Block block, Building core, ItemStack stack){
+        if(stack == null || stack.item == null || stack.amount <= 0)
+            return;
+        int target = Math.max(block.itemCapacity, stack.amount);
+        feedFromCoreItems(b, core, stack.item, target);
+    }
+
+    /** 把一种物品补到 target（不超过 core 现有量）；每帧差额搬运，不做定时器或批量扣款。 */
+    private void feedFromCoreItems(Building b, Building core, Item item, int target){
+        if(item == null || target <= 0)
+            return;
+        int missing = target - b.items.get(item);
+        if(missing <= 0)
+            return;
+        if(b.cheating()){
+            b.items.add(item, missing);
+            return;
+        }
+        if(core == null || core.items == null)
+            return;
+        int amount = Math.min(missing, core.items.get(item));
+        if(amount <= 0)
+            return;
+        core.items.remove(item, amount);
+        b.items.add(item, amount);
     }
 
     /**

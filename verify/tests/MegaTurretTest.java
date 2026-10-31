@@ -424,6 +424,23 @@ public class MegaTurretTest implements ApplicationListener{
             }
             check("炮台放回了巨兽附近的世界里（找到 " + nearby.size + " 座）", nearby.size == 3);
 
+            boolean overlapsBody = false;
+            for(Building b : nearby){
+                float half = b.block.size * Vars.tilesize * 0.5f;
+                float nx = arc.math.Mathf.clamp(mega.x, b.x - half, b.x + half);
+                float ny = arc.math.Mathf.clamp(mega.y, b.y - half, b.y + half);
+                float r = Math.max(1f, mega.hitSize() * 0.5f);
+                if(arc.math.Mathf.dst2(mega.x, mega.y, nx, ny) < r * r){
+                    overlapsBody = true;
+                    break;
+                }
+            }
+            check("陆地巨兽释放炮台后，没有炮台压在巨兽机体里", !mega.isFlying() && !overlapsBody);
+            float releaseHealth = mega.health();
+            run(120);
+            check("释放后陆地巨兽没有被炮台挤伤/挤死",
+                mega.isAdded() && !mega.dead && mega.health() >= releaseHealth - 0.01f);
+
             int absorbed = (Integer)mergeCls.getMethod("absorbNearbyTurrets", megaCls()).invoke(null, mega);
             check("追加吸收把放出去的炮台又吃回来（≥1）", absorbed >= 1);
             run(3);

@@ -40,7 +40,7 @@ ext {
     // - latest: depend on the latest release of mindustry
     // - be: depend on the very latest commit of mindustry
     // - v<number>: depend on a specific commit
-    mindustryVersion = "v160.1"
+    mindustryVersion = "v160.7"
     isWindows = System.getProperty("os.name").toLowerCase().contains("windows")
     sdkRoot = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
 }
@@ -49,25 +49,50 @@ dependencies {
     compileOnly mindustryVersion == "be" ? "Anuken:MindustryBuilds:latest" : "Anuken:Mindustry:$mindustryVersion"
 }
 
-tasks.register('jarAndroid') {
+tasks.register('jarAndroid', JavaExec) {
     dependsOn "jar"
     def projectName = project.name
+    group = 'build'
+    description = 'Dexes the desktop mod JAR with the Android SDK d8 tool.'
+    def buildToolsRoot = sdkRoot ? new File(sdkRoot, "build-tools") : null
+    def d8Jar = buildToolsRoot?.listFiles()
+            ?.findAll { new File(it, "lib/d8.jar").isFile() }
+            ?.sort { it.name }
+            ?.reverse()
+            ?.find { true }
+            ?.toPath()
+            ?.resolve("lib/d8.jar")
+            ?.toFile()
+    def javaExecutable = new File(System.getProperty("java.home"), isWindows ? "bin/java.exe" : "bin/java")
 
-    doLast {
+    classpath = d8Jar ? files(d8Jar) : files()
+    mainClass = "com.android.tools.r8.D8"
+    executable = javaExecutable.absolutePath
+
+    doFirst {
         if (!sdkRoot || !new File(sdkRoot).exists()) throw new GradleException("No valid Android SDK found. Ensure that ANDROID_HOME is set to your Android SDK directory.")
 
         def platformRoot = new File("$sdkRoot/platforms/").listFiles().sort().reverse().find { f -> new File(f, "android.jar").exists() }
 
         if (!platformRoot) throw new GradleException("No android.jar found. Ensure that you have an Android platform installed.")
 
-        //collect dependencies needed for desugaring
-        def dependencies = (configurations.compileClasspath.asList() + configurations.runtimeClasspath.asList() + [new File(platformRoot, "android.jar")]).collect { "--classpath $it.path" }.join(" ")
+        if (!d8Jar) throw new GradleException("No d8.jar found. Install a recent Android SDK Build Tools version.")
 
-        def d8 = isWindows ? "d8.bat" : "d8"
+        def dependencies = configurations.compileClasspath.asList() +
+                configurations.runtimeClasspath.asList() +
+                [new File(platformRoot, "android.jar")]
+        def desktopJar = layout.buildDirectory.file("libs/${projectName}Desktop.jar").get().asFile
+        def androidJar = layout.buildDirectory.file("libs/${projectName}Android.jar").get().asFile
+        def d8Args = ["--min-api", "14", "--output", androidJar.absolutePath]
 
-        //dex and desugar files - this requires d8 in your PATH
-        "$d8 $dependencies --min-api 14 --output ${projectName}Android.jar ${projectName}Desktop.jar"
-                .execute(null, new File("build/libs")).waitForProcessOutput(System.out, System.err)
+        dependencies.each { dependency ->
+            d8Args.addAll(["--classpath", dependency.absolutePath])
+        }
+        d8Args.add(desktopJar.absolutePath)
+        setArgs(d8Args)
+
+        println("Using d8: ${d8Jar.absolutePath}")
+        println("Using Java: ${javaExecutable.absolutePath}")
     }
 }
 
@@ -118,3 +143,23 @@ tasks.register('deploy', Jar) {
     }
 }
 
+def installMod = tasks.register("installMod", Copy) {
+    dependsOn(deploy)
+    description = "打包完成后自动复制到 Mindustry 的 mods 目录"
+    group = "build"
+
+    def modsDir = isWindows
+            ? new File(System.getenv("APPDATA"), "Mindustry/mods")
+            : new File(System.getProperty("user.home"), ".local/share/Mindustry/mods")
+
+    from(layout.buildDirectory.file("libs/${project.name}.jar"))
+    into(modsDir)
+
+    doFirst {
+        if (!modsDir.exists()) {
+            modsDir.mkdirs()
+            println("已创建 mods 目录: ${modsDir.absolutePath}")
+        }
+        println("将模组复制到: ${modsDir.absolutePath}")
+    }
+}
